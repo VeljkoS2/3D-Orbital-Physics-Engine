@@ -1,0 +1,131 @@
+Fast mobile star.
+
+Introduction.
+
+This sun works fast enough on mobile devices and each part of it (core, halo, prominences) contains a sufficient number of settings that will allow you to make your own unique star.
+
+Asset content:
+1. Main camera - simple camera
+2. The core of the Sun is based on a 720p polygon geoid mesh, contains two textures and one material, a sun surface texture and a noise texture and one shader
+3 Solar Prominence is a particle system based on visual effects graph. Contains one solar prominence texture and particle system.
+4.Solar Halo - This is a post effect imitation of the process using a shader contains: two materials and two shaders. 
+The first shader is very easy to use and uses sliders, the second shader has no sliders and is intended for deep settings. 
+For a simple halo effect, it's enough to use a simple material, not a deep one.
+5. A bonus is a sky material with six textures in a resolution of 2048x2048
+
+How to use it all:
+
+1. The core of the sun.
+By clicking on the SunCore object in the hierarchy, you will see the core material in the inspector, expanding its parameters, you will see the following:
+
+1.1 The core material has two sliders for sun brightness and sun speed
+With the brightness slider, you adjust the brightness of the sun, but you can achieve a greater effect by changing the HDR color, but more on that later.
+Sun Speed ​​- This slider gives you control over the speed at which the sun's surface evolves.
+
+1.2 
+Colors 1
+Colors 2
+Colors 3
+Colors 4
+this is the HDR color, by clicking on which you will see the color palette can be changed by the circular slider, 
+the color saturation changes in the square field, the RGB drop-down list, and the R,G,B sliders  we don't need it either.
+But intensity has a strong impact on the overall picture.
+
+They give full control over the color of the sun's core, changing the intensity, changing colors along the circular slider, 
+for these  four colors, you can achieve both realistic effects and the most fantastic alien stars.
+
+
+2. SunProminences.
+By clicking on the object solar prominences in the hierarchy, you will see the properties of the particle system in the inspector.
+
+2.1 Ammount - the number of generated prominences.
+2.2 Promin_Radius -this is the radius of the surface from which the prominences arise.
+
+2.3 FrameRate - the speed of playing the animation of prominences (the number of frames per second).
+
+2.4 SizeOverLife - this curve gives an indication of the prominence of what size they have at each interval of their life. 
+By clicking on the curve, you can change it, create your own or change the existing one, I recommend only moving the midpoint of the curve up or down, so the result is the most realistic.
+
+2.5 ColorOverLife is an HDR gradient that allows you to set the color of prominences at every moment of their life. Click on the gradient and you can modify it.
+
+2.6 HDR gradient editor:
+The left edge of the gradient is the birth of a prominence, and the right edge of the gradient is its death.
+Leave Blend mode is more realistic.
+the upper sliders above the gradient are responsible for transparency, you can change the Alpha of the click field on the slider and see the effect.
+The lower sliders are the colors, change them to your comfort, but if you need a yellow sun, it is better to leave it as it is :-)
+The location moves the selected slider.
+Below you will see gradient presets, in particular for the blue star.
+
+2.7 Lifetime random from - the minimum number of the lifetime of a prominence in seconds
+
+2.8 Lifetime random to - maximum number of prominence lifetime.
+
+2.9 Trail spawn rate - the number of generated trails
+
+2.10 Trail gradient see point 2.6 of this document.
+
+2.11 Trail radius is the distance from the surface of the star that trails can fly away.
+
+2.12 Trail size - trail size by thickness :-)
+
+2.13 Trail size over life - this curve gives an indication of the trails of what size they have at each interval of their life. 
+By clicking on the curve, you can change it, create your own or change the existing one, I recommend only moving the midpoint of the curve up or down, so the result is the most realistic.
+
+3.Sun Halo
+
+By clicking on the halo sun object in the hierarchy, you will see the halo material in the inspector, expanding its parameters, you will see the following:
+Halo is superimposed on a model containing about 500 polygons, and the material shader itself consists of two rings, each with its own color. 
+Basically, by manipulating with these colors, you will achieve the effect you want.
+The first ring is closer to the sun and has a brighter color, the second is farther and darker, however this is at your discretion, all the settings are in front of you.
+
+3.1
+halo ring 1 - first ring energy effect
+
+3.2
+Halo ring 1 color - this is the HDR color, by clicking on which you will see the color palette can be changed by the circular slider, 
+the color saturation changes in the square field, the RGB drop-down list, and the R,G,B sliders  we don't need it either.
+you mai play with A slider, but i dont do it. Intensity has a strong impact on the overall picture.
+
+3.3
+Halo Ring 1 size - controls the size of the inner halo ring
+
+3.3.1
+Halo Ring 1 intensity - Inner ring intensity
+
+3.3.2
+Halo Ring 1 strenght  -Inner ring strenght
+
+
+3.4
+Halo ring 2 = second ring energy effect
+
+3.5
+Halo ring str - Outer ring strenght
+
+3.6
+Halo Ring 2 thickness - thickness of outer ring
+
+3.7
+Halo Ring 2 color - this is the HDR color, by clicking on which you will see the color palette can be changed by the circular slider, 
+the color saturation changes in the square field, the RGB drop-down list, and the R,G,B sliders  we don't need it either.
+you mai play with A slider, but i dont do it. Intensity has a strong impact on the overall picture.
+
+3.8 
+Halo Ring 2 Size - Size of outer ring
+
+3.9
+Halo Ring 2 intensity - outer ring intensity
+
+4.0
+Halo Ring 2 width - width of outer ring
+
+5.0 textures are not compressed you must choise you prefer compression metod.
+
+
+
+Bonus - deep tweak halo material - DeepTweak_Halo_Mat 1  and shader - Deep_Tweak_Halo_SH2. I left this shader the way I use it myself, there are no sliders restrictions, 
+and by manipulating the values ​​in the material you can achieve the most unexpected results, for any need.
+
+If something is still not clear, write to me at dim@veerdna.ru
+
+Thank you for purchasing the asset and use it for your benefit :-)

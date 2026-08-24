@@ -1,0 +1,17 @@
+fileFormatVersion: 2
+guid: bdaf7945a8d427f42bdfc7a20279674c
+ScriptedImporter:
+  internalIDToNameTable: []
+  externalObjects: {}
+  serializedVersion: 2
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+  script: {fileID: 11500000, guid: 625f186215c104763be7675aa2d941aa, type: 3}
+AssetOrigin:
+  serializedVersion: 1
+  productId: 176779
+  packageName: Fast Mobile Sun
+  packageVersion: 1.0
+  assetPath: Assets/Fast_Mobile_Star/Shaders/SunCore.shadergraph
+  uploadId: 388091
