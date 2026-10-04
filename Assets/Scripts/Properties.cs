@@ -1,4 +1,6 @@
+using System;
 using Unity.Mathematics;
+using Unity.VisualScripting;
 using UnityEngine;
 
 public class Properties : MonoBehaviour
@@ -23,6 +25,7 @@ public class Properties : MonoBehaviour
     public double2 ring = new double2();
 
     public BlackHoleParamaters blackHoleParamaters;
+    public BlackHoleAppearanceProperties blackHoleAppearanceProperties;
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
     {
@@ -40,7 +43,6 @@ public class Properties : MonoBehaviour
             if(!GlobalProperties.blackHoles.Contains(gameObject))
             {
                 GlobalProperties.blackHoles.Add(gameObject);
-                Debug.Log("yay");
             }
         }
         transform.rotation = Quaternion.Euler(startingRotation);
@@ -55,7 +57,8 @@ public class Properties : MonoBehaviour
 
     public void Rotate(Transform transform, double rotationalSpeedDeg)
     {
-        transform.Rotate(0, -(float)(rotationalSpeedDeg * Time.deltaTime * GlobalProperties.timeScale), 0);
+        if(rotationalPeriod != 0)
+            transform.Rotate(0, -(float)(rotationalSpeedDeg * Time.deltaTime * GlobalProperties.timeScale), 0);
     }
 
     public void CalculateRadius()
@@ -63,10 +66,15 @@ public class Properties : MonoBehaviour
         if (mass > 6e32)
         {
             CalculateBlackHoleParamaters(this);
-            radius = blackHoleParamaters.schwarzschildRadiusWorld*1.5;
-            blackHoleParamaters.diskInnerRadiusNormalized = 3.0f;
+            AssignBlackHoleAppearanceProperties(this);
+            radius = blackHoleParamaters.schwarzschildRadiusWorld*1.1f;
+            blackHoleParamaters.diskInnerRadiusNormalized = 2.0f;
             blackHoleParamaters.diskOuterRadiusNormalized = 12.0f;//rnd.NextFloat(clamped * 0.8f, clamped * 1.2f);
             blackHoleParamaters.escapeRadiusNormalized = blackHoleParamaters.diskOuterRadiusNormalized * 2.0f;
+            var spinRnd = new Unity.Mathematics.Random((uint)System.DateTime.Now.Ticks * 747796405u | 1u); // seed must be non-zero
+            blackHoleParamaters.spin = spinRnd.NextFloat();
+            blackHoleParamaters.diskRotation = 1.0f;
+            blackHoleParamaters.accretionDisk = true;
             //SetShaderPropperties(blackHoleParamaters);
             //gameObject.AddComponent<BlackHoleLod>();
             type = 3;
@@ -88,6 +96,18 @@ public class Properties : MonoBehaviour
             transform.localScale = new Vector3((float)(radius / GlobalProperties.scale) * 2f, (float)(radius / GlobalProperties.scale) * 2f, (float)(radius / GlobalProperties.scale) * 2f);
         }
     }
+
+    public void CalculateBlackHoleISCO(Properties blackHole)
+    {
+        double a = blackHole.blackHoleParamaters.spin;
+        double mass = blackHoleParamaters.mass;
+
+        double Z1 = 1 + Math.Pow((1 - a * a), 1 / 3) * (Math.Pow((1 + a), 1 / 3) + Math.Pow((1 - a), 1 / 3));
+        double Z2 = Math.Sqrt(3 * a * a + Z1 * Z1);
+
+        blackHole.blackHoleParamaters.diskInnerRadiusNormalized = (Math.Sign(blackHole.blackHoleParamaters.diskRotation) == Math.Sign(a)) ? (float)(3 + Z2 - Math.Sqrt((3 - Z1) * (3 + Z1 + 2 * Z2)) * mass) : (float)(3 + Z2 + Math.Sqrt((3 - Z1) * (3 + Z1 + 2 * Z2)) * mass);
+    }
+
     public void CalculateLight()
     {
         Renderer renderer = GetComponent<Renderer>();
@@ -119,6 +139,30 @@ public class Properties : MonoBehaviour
         bp.blackHolePositionUnits = blackHole.gameObject.transform.position;
 
         blackHole.blackHoleParamaters = bp;
+    }
+
+    public void AssignBlackHoleAppearanceProperties(Properties blackHole)
+    {
+        BlackHoleAppearanceProperties bp = new BlackHoleAppearanceProperties();
+
+        bp.diskPeakTemperature = 6000;
+        bp.diskBrightness = 4.0f;
+        bp.diskDopplerBeaming = 1.0f;
+        bp.diskDopplerColor = 1.0f;
+        bp.diskHigherOrderFade = 0.0f;
+        bp.diskISCOStress = 0.03f;
+        bp.diskRadialContrast = 1.0f;
+        bp.diskTurbulance = 0.75f;
+        bp.hotSpotCount = 3;
+        bp.hotSpotStrength = 1.0f;
+        bp.hotSpotRMin = 1.08f;  
+        bp.hotSpotRMax = 2.7f;
+        bp.physicalDiskTemperature = true;
+        bp.eddingtonRatio = 0.1f;
+        bp.diskTint = new Color(1.0f, 1.0f, 1.0f);
+        bp.diskTintStrength = 0.0f;
+
+        blackHole.blackHoleAppearanceProperties = bp;
     }
 
     public void CalculateOrbitalParamaters(Properties body, Properties dominantBody)

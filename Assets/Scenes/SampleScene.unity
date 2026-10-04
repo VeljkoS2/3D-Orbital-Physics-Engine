@@ -219,6 +219,11 @@ MonoBehaviour:
   dt: 0
   simulatedTimePerFrameFactor: 10
   maxSubsteps: 1000
+  gravitationalWaves: 1
+  gwStrength: 1
+  keepAccuracy: 1
+  blackHoleMergers: 1
+  mergerRecoil: 0
 --- !u!114 &65476194
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -271,14 +276,22 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::BlackHoleGlobalManager
   blackHoles: []
-  diskAngularVelocity: 0.001
-  skybox: {fileID: 8900000, guid: 18ec2d52be8f4524a97c25a2ed27838e, type: 3}
-  noiseTexture: {fileID: 2800000, guid: 5db3bd75740db214a8d9b5d60b4db8b7, type: 3}
-  BlackHoleLut: {fileID: 2800000, guid: fa40179a7c6c3ee408952d872b25ce4e, type: 3}
-  BlackHoleLutCaptured: {fileID: 2800000, guid: fa40179a7c6c3ee408952d872b25ce4e, type: 3}
-  KerrRadialLut: {fileID: 11700000, guid: 88aa202cd9a703a49858cf6ac7558d1f, type: 2}
-  KerrPolarLut: {fileID: 11700000, guid: af55a4f3d81bc9446b9d95ce6882eb06, type: 2}
-  KerrCritHeader: {fileID: 2800000, guid: cf0bb56225198484bac5193eaa9c24ad, type: 2}
+  innerKerrRadiusSlowRs: 6
+  innerKerrRadiusFastRs: 12
+  groupRadiusRs: 40
+  debugForceMedium: 0
+  cbdCavity: 2
+  cbdOuterScale: 1
+  cbdBrightness: 1
+  cbdSpeed: 1
+  mergerRingdownM: 10
+  mergerTimeStretch: 1
+  cbdLookCurve: 1
+  skybox: {fileID: 8900000, guid: 2505f0c83c6f06640b7a5c9f0224fe00, type: 3}
+  noiseTexture: {fileID: 2800000, guid: dabcef50645c24543b5fe4c2ac1fb3f4, type: 3}
+  kerrSnCnLUT: {fileID: 2800000, guid: d754fecc6cc829a44bb91eacc0e788a5, type: 2}
+  kerrKLUT: {fileID: 2800000, guid: 9ad36e44bd3156d43b0e770253873129, type: 2}
+  kerrFLUT: {fileID: 2800000, guid: 77567553cad4c5c45ae8bb619825e760, type: 2}
 --- !u!1 &152662280 stripped
 GameObject:
   m_CorrespondingSourceObject: {fileID: 100000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -352,7 +365,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &152662284 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 400000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -587,7 +620,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!114 &245238771
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -600,23 +633,23 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b23267dc67cf0c24e91cd9089e161989, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Properties
-  mass: 2e+33
+  mass: 6.1e+33
   hasAtmosphere: 0
   hasRings: 0
   worldPosition:
     x: 0
     y: 0
-    z: 0
+    z: 142857142.857143
   acceleration:
     x: 0
     y: 0
     z: 0
   velocity:
-    x: 0
+    x: 80000000
     y: 0
     z: 0
-  rotationalPeriod: 1000000000
-  startingRotation: {x: 0, y: 1, z: 0}
+  rotationalPeriod: 0
+  startingRotation: {x: 0, y: 0, z: 0}
   dominantBody: {fileID: 0}
   orbitalParamaters:
     semiMajorAxis: 0
@@ -656,7 +689,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0.000000001
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &245238772
 Transform:
   m_ObjectHideFlags: 0
@@ -1054,7 +1107,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &329068267 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 400000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -1298,7 +1371,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &352165952 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 400000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -1377,7 +1470,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!1 &446033208 stripped
 GameObject:
   m_CorrespondingSourceObject: {fileID: 100000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -1451,7 +1564,7 @@ MonoBehaviour:
     y: 0
     z: 0
   velocity:
-    x: -9680
+    x: 0
     y: 0
     z: 0
   rotationalPeriod: 37998
@@ -1495,7 +1608,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &498974212 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 400000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -1599,7 +1732,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!222 &617533406
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -1810,6 +1943,127 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 712672934}
   m_CullTransparentMesh: 1
+--- !u!1 &766182175
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 766182177}
+  - component: {fileID: 766182176}
+  m_Layer: 0
+  m_Name: Black Hole 2 (2)
+  m_TagString: Body
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 0
+--- !u!114 &766182176
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 766182175}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b23267dc67cf0c24e91cd9089e161989, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Properties
+  mass: 1.9e+42
+  hasAtmosphere: 0
+  hasRings: 0
+  worldPosition:
+    x: 0
+    y: 0
+    z: 1e+17
+  acceleration:
+    x: 0
+    y: 0
+    z: 0
+  velocity:
+    x: 0
+    y: 0
+    z: 0
+  rotationalPeriod: 0
+  startingRotation: {x: 45, y: 0, z: 0}
+  dominantBody: {fileID: 0}
+  orbitalParamaters:
+    semiMajorAxis: 0
+    semiMinorAxis: 0
+    semiParamater: 0
+    eccentricityVector:
+      x: 0
+      y: 0
+      z: 0
+    eccentricityScalar: 0
+    apoapsis: 0
+    periapsis: 0
+    inclination: 0
+    longitudeOfTheAscendingNode: 0
+    argumentOfPeriapsis: 0
+    meanMotion: 0
+    orbitalPeriod: 0
+    trueAnomaly: 0
+    meanAnomaly: 0
+    eccentricAnomaly: 0
+    specificOrbitalEnergy: 0
+    specificAngularMomentumVector:
+      x: 0
+      y: 0
+      z: 0
+    ascendingNodeVector:
+      x: 0
+      y: 0
+      z: 0
+  ring:
+    x: 0
+    y: 0
+  blackHoleParamaters:
+    mass: 0
+    schwarzschildRadiusWorld: 0
+    schwarzschildRadiusUnits: 0
+    diskInnerRadiusNormalized: 0
+    diskOuterRadiusNormalized: 0
+    escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
+    blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0.000000001
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
+--- !u!4 &766182177
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 766182175}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 1.3794774e+10, y: -3.04542, z: -1.569315e+9}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &803963486 stripped
 GameObject:
   m_CorrespondingSourceObject: {fileID: 100000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -1883,7 +2137,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!1 &832575517
 GameObject:
   m_ObjectHideFlags: 0
@@ -1962,7 +2236,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b23267dc67cf0c24e91cd9089e161989, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Properties
-  mass: 1.9e+41
+  mass: 7.16e+33
   hasAtmosphere: 0
   hasRings: 0
   worldPosition:
@@ -1974,11 +2248,11 @@ MonoBehaviour:
     y: 0
     z: 0
   velocity:
-    x: 22777200
+    x: 0
     y: 0
     z: 0
-  rotationalPeriod: 10000000000
-  startingRotation: {x: 45, y: 0, z: 0}
+  rotationalPeriod: 0
+  startingRotation: {x: 0, y: 0, z: 0}
   dominantBody: {fileID: 0}
   orbitalParamaters:
     semiMajorAxis: 0
@@ -2018,7 +2292,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0.000000001
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &875091336
 Transform:
   m_ObjectHideFlags: 0
@@ -2735,7 +3029,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &1095649356 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 400000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -2814,7 +3128,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &1151134626 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 400000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -3508,7 +3842,7 @@ MonoBehaviour:
   worldPosition:
     x: 0
     y: 0
-    z: 1e+17
+    z: 8000000000000000
   acceleration:
     x: 0
     y: 0
@@ -3558,7 +3892,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!1 &1403758414
 GameObject:
   m_ObjectHideFlags: 0
@@ -4751,7 +5105,27 @@ MonoBehaviour:
     diskInnerRadiusNormalized: 0
     diskOuterRadiusNormalized: 0
     escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
     blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
 --- !u!4 &1976214272 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 400000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
@@ -4841,6 +5215,127 @@ PrefabInstance:
       insertIndex: -1
       addedObject: {fileID: 45510566}
   m_SourcePrefab: {fileID: 100100000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
+--- !u!1 &2037533112
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2037533114}
+  - component: {fileID: 2037533113}
+  m_Layer: 0
+  m_Name: Black Hole 2 (1)
+  m_TagString: Body
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 0
+--- !u!114 &2037533113
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2037533112}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b23267dc67cf0c24e91cd9089e161989, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Properties
+  mass: 1.9e+42
+  hasAtmosphere: 0
+  hasRings: 0
+  worldPosition:
+    x: 0
+    y: -1e+17
+    z: 0
+  acceleration:
+    x: 0
+    y: 0
+    z: 0
+  velocity:
+    x: 0
+    y: 0
+    z: 0
+  rotationalPeriod: 0
+  startingRotation: {x: 45, y: 0, z: 0}
+  dominantBody: {fileID: 0}
+  orbitalParamaters:
+    semiMajorAxis: 0
+    semiMinorAxis: 0
+    semiParamater: 0
+    eccentricityVector:
+      x: 0
+      y: 0
+      z: 0
+    eccentricityScalar: 0
+    apoapsis: 0
+    periapsis: 0
+    inclination: 0
+    longitudeOfTheAscendingNode: 0
+    argumentOfPeriapsis: 0
+    meanMotion: 0
+    orbitalPeriod: 0
+    trueAnomaly: 0
+    meanAnomaly: 0
+    eccentricAnomaly: 0
+    specificOrbitalEnergy: 0
+    specificAngularMomentumVector:
+      x: 0
+      y: 0
+      z: 0
+    ascendingNodeVector:
+      x: 0
+      y: 0
+      z: 0
+  ring:
+    x: 0
+    y: 0
+  blackHoleParamaters:
+    mass: 0
+    schwarzschildRadiusWorld: 0
+    schwarzschildRadiusUnits: 0
+    diskInnerRadiusNormalized: 0
+    diskOuterRadiusNormalized: 0
+    escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
+    blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0.000000001
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
+--- !u!4 &2037533114
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2037533112}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 1.3794774e+10, y: -3.04542, z: -1.569315e+9}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &2051123709
 GameObject:
   m_ObjectHideFlags: 0
@@ -5023,3 +5518,5 @@ SceneRoots:
   - {fileID: 1389804441}
   - {fileID: 245238772}
   - {fileID: 875091336}
+  - {fileID: 2037533114}
+  - {fileID: 766182177}

@@ -96,7 +96,6 @@ MonoBehaviour:
     x: 0
     y: 0
     z: 0
-  starLight: {fileID: 0}
   rotationalPeriod: 86400
   startingRotation: {x: 0, y: 1, z: 0}
   dominantBody: {fileID: 0}
@@ -128,3 +127,34 @@ MonoBehaviour:
       x: 0
       y: 0
       z: 0
+  ring:
+    x: 0
+    y: 0
+  blackHoleParamaters:
+    mass: 0
+    schwarzschildRadiusWorld: 0
+    schwarzschildRadiusUnits: 0
+    diskInnerRadiusNormalized: 0
+    diskOuterRadiusNormalized: 0
+    escapeRadiusNormalized: 0
+    spin: 0
+    diskRotation: 0
+    accretionDisk: 0
+    blackHolePositionUnits: {x: 0, y: 0, z: 0}
+  blackHoleAppearanceProperties:
+    diskPeakTemperature: 0
+    diskDopplerColor: 0
+    diskDopplerBeaming: 0
+    diskRadialContrast: 0
+    diskBrightness: 0
+    diskISCOStress: 0
+    diskTurbulance: 0
+    diskHigherOrderFade: 0
+    hotSpotCount: 0
+    hotSpotStrength: 0
+    hotSpotRMin: 0
+    hotSpotRMax: 0
+    physicalDiskTemperature: 0
+    eddingtonRatio: 0.000000001
+    diskTint: {r: 0, g: 0, b: 0, a: 0}
+    diskTintStrength: 0
