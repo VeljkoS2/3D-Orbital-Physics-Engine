@@ -63,6 +63,9 @@ public class BlackHoleGlobalManager : MonoBehaviour
     readonly HoleState finalDisk = new HoleState();
     int finalRowVersion = -1;
 
+    static readonly int BHSpinAxisId = Shader.PropertyToID("_BHSpinAxis");
+    readonly Vector4[] spinAxis = new Vector4[MaxBlackHoles];
+
     static readonly int BHCountId = Shader.PropertyToID("_BHCount");
     static readonly int BHPositionsId = Shader.PropertyToID("_BHPositionsCamRelative");
     static readonly int BHParamsId = Shader.PropertyToID("_BHParams");
@@ -219,7 +222,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
     {
         if (!states.TryGetValue(hole, out var st))
         {
-            var rng = new System.Random(hole.GetInstanceID());
+            var rng = new System.Random(hole.GetEntityId());
             var props = hole.GetComponent<Properties>();
             var bh = props.blackHoleParamaters;
             st = new HoleState
@@ -882,8 +885,14 @@ public class BlackHoleGlobalManager : MonoBehaviour
         cbd11 = new Vector4(bh.diskRotation, outerN, 0f, 0f);
     }
 
+    [Header("Cameras")]
+    [Tooltip("Match BlackHoleRendererFeature's renderInSceneView.")]
+    public bool updateForSceneView = false;
+
     void OnBeginCameraRendering(ScriptableRenderContext context, Camera cam)
     {
+        if (cam.cameraType == CameraType.Preview || cam.cameraType == CameraType.Reflection) return;
+        if (cam.cameraType == CameraType.SceneView && !updateForSceneView) return;
         AdvanceMergeAnim();
 
         int count = 0;
@@ -1042,6 +1051,8 @@ public class BlackHoleGlobalManager : MonoBehaviour
             float m = 0.5f * rs;
             float jMag = Mathf.Clamp(bh.spin, -0.998f, 0.998f) * m * m;
             spinJ[i] = new Vector4(up.x * jMag, up.y * jMag, up.z * jMag, m);
+            float sClamped = Mathf.Clamp(bh.spin, -0.998f, 0.998f);
+            spinAxis[i] = new Vector4(up.x, up.y, up.z, sClamped * sClamped * m * m * m);   // M a^2 = J^2 / M
 
             float peakT = bp.physicalDiskTemperature
                 ? (float)PeakDiskTemperature(bh.mass, st.rIsco, st.eIsco, st.fluxNorm, bp.eddingtonRatio)
@@ -1110,6 +1121,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
         Shader.SetKeyword(singleHoleKeyword, count == 1 && !debugForceMedium);
 
         Shader.SetGlobalVectorArray(BHSpinJId, spinJ);
+        Shader.SetGlobalVectorArray(BHSpinAxisId, spinAxis);
         Shader.SetGlobalVectorArray(BHDiskCutId, diskCut);
         Shader.SetGlobalVector(BHCBD0Id, cbd0);
         Shader.SetGlobalVector(BHCBD1Id, cbd1);

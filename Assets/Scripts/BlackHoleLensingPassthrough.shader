@@ -23,6 +23,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
 
         int _BHCount;
         float4 _BHSpins[8];               // x = spin a/M, y = Kepler factor, z = 1 if member of a close group, w = 1 if disk on
+        float4 _BHSpinAxis[8];   // xyz unit spin axis, w = M a^2 (world^3)  (C#)
         float4 _BHPositionsCamRelative[8];
         float4 _BHParams[8];              // x = rs (world), y = exact Kerr sphere (Rs, 0 = merger mode), z = disk outer (Rs), w = group/accuracy sphere (Rs)
         float4 _BHDiskNormals[8];
@@ -197,6 +198,16 @@ Shader "Custom/BlackHoleLensingPassthrough"
         Texture2D<float4> _BHLow2;
         float4 _BHLowSize;
         float _BHDownsample;
+        float4 _BHFullSize;              // full-res size: xy pixels, zw 1/pixels (C#)
+        #define BH_CLASS_WEAK 16384.0    // low-res texel outside every region (weak bend only, 3+ holes)
+
+        // Low-res texel i is traced exactly at full-res pixel ds*i: every reconstruction cell is an
+        // aligned ds x ds pixel block, so whole 2x2 quads pass or fail together.
+        float2 LowTexelUV(float2 lowUV)
+        {
+            float2 i = floor(lowUV * _BHLowSize.xy);
+            return (i * _BHDownsample + 0.5) * _BHFullSize.zw;
+        }
 
         #define BH_WHY_NONE      0
         #define BH_WHY_HORIZON   1
@@ -342,6 +353,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 cr.firstIdx = (float)idx;
                 cr.emFirst = em;
                 anyEm = true;
+                g_bhSkipFirstColor = false;
             }
             cr.emAll += em * cr.T;
             cr.T *= 1.0 - op;
@@ -480,11 +492,10 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 B += (fr * (3.0 * dot(J, xh) * xh - J) + cross(gradf, cross(J, dx))) * ir3;
             #endif
             #if BH_QUADRUPOLE
-                float J2 = dot(J, J);
-                if (J2 > 0.0)
+                float Ma2 = _BHSpinAxis[i].w;
+                if (Ma2 > 0.0)
                 {
-                    float Ma2 = J2 / max(m, 1e-30);          // J = a M  ->  M a^2 = J^2 / M
-                    float3 sh = J * rsqrt(J2);
+                    float3 sh = _BHSpinAxis[i].xyz;
                     float sx = dot(sh, dx);
                     float ir5 = ir3 * ir2;
                     float ir7 = ir5 * ir2;
@@ -940,7 +951,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
         bool Reconstruct(float2 uv, out float3 color)
         {
             color = 0;
-            float2 p = uv * _BHLowSize.xy - 0.5;
+            float2 p = (uv * _BHFullSize.xy - 0.5) / _BHDownsample;
             int2 i0 = (int2) floor(p);
             float2 f = p - (float2) i0;
             int2 mx = (int2) _BHLowSize.xy - 1;
@@ -957,6 +968,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
             if (b00.w != b10.w || b00.w != b01.w || b00.w != b11.w) return false;
             float cls = b00.w;
             if (cls < 32.0) return false;
+            if (cls >= BH_CLASS_WEAK) return false;
             bool captured = (fmod(cls, 2.0) >= 1.0);
             bool hasFirst = (fmod(floor(cls / 2.0), 2.0) >= 1.0);
             float firstIdx = fmod(floor(cls / 4.0), 8.0);
@@ -1038,6 +1050,30 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 color += SampleSky(dir, skyFoot) * a.a;
             return true;
         }
+
+        bool ReconstructWeakDir(float2 uv, out float3 dir)
+        {
+            dir = 0;
+            float2 p = (uv * _BHFullSize.xy - 0.5) / _BHDownsample;
+            int2 i0 = (int2) floor(p);
+            float2 f = p - (float2) i0;
+            int2 mx = (int2) _BHLowSize.xy - 1;
+            float4 b00 = _BHLow1.Load(int3(clamp(i0, 0, mx), 0));
+            float4 b10 = _BHLow1.Load(int3(clamp(i0 + int2(1, 0), 0, mx), 0));
+            float4 b01 = _BHLow1.Load(int3(clamp(i0 + int2(0, 1), 0, mx), 0));
+            float4 b11 = _BHLow1.Load(int3(clamp(i0 + int2(1, 1), 0, mx), 0));
+            if (b00.w != BH_CLASS_WEAK || b10.w != BH_CLASS_WEAK ||
+                b01.w != BH_CLASS_WEAK || b11.w != BH_CLASS_WEAK)
+                return false;
+            float l1 = length(b10.xyz - b00.xyz);
+            float l2 = length(b01.xyz - b00.xyz);
+            float perPixMin = min(l1, l2) / _BHDownsample;
+            float3 twist = (b00.xyz + b11.xyz) - (b10.xyz + b01.xyz);
+            float twistMax = BH_UPS_MAX_TWIST * perPixMin;
+            if (dot(twist, twist) > twistMax * twistMax) return false;
+            dir = normalize(lerp(lerp(b00.xyz, b10.xyz, f.x), lerp(b01.xyz, b11.xyz, f.x), f.y));
+            return true;
+        }
         ENDHLSL
 
         Tags { "RenderType"="Opaque" }
@@ -1116,7 +1152,13 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 #endif
                     float Tc;
                     float3 ec = CBDLineEmission(dir, count, Tc);
-                    float3 d = WeakOnlyDir(dir, count);
+                    float3 d = 0;
+                    bool rec = false;
+                    [branch]
+                    if (count >= 3 && _BHDownsample > 1.5)
+                        rec = ReconstructWeakDir(input.texcoord, d);
+                    if (!rec)
+                        d = WeakOnlyDir(dir, count);
                     float pixAngleW = 2.0 / (UNITY_MATRIX_P[1][1] * _ScreenParams.y);
                     float3 sky = SampleSky(d, pixAngleW);
                     float3 outC = ObserverShift(ec + sky * Tc);
@@ -1170,12 +1212,30 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 o.t2 = float4(0, 0, 0, 0);
                 if (_BHCount == 0) return o;
 
-                float3 dir = PixelRayDir(input.texcoord);
+                float2 uv = LowTexelUV(input.texcoord);
+                float3 dir = PixelRayDir(uv);
                 int count = min(_BHCount, 8);
                 int camHole = CameraHole(count);
-                if (FirstDomainEntry(dir, count, camHole) > 1e30)
+                float tFirst = FirstDomainEntry(dir, count, camHole);
+                if (tFirst > 1e30)
+                {
+                #if defined(BH_SINGLE)
+                    // same class as an escaping single-hole trace without disk (traces 1 -> 32, hole 0 -> 512):
+                    // cells across the region edge reconstruct instead of going to the full trace
+                    o.t1 = float4(WeakOnlyDir(dir, count), 544.0);
+                #else
+                    if (count >= 3)
+                        o.t1 = float4(WeakOnlyDir(dir, count), BH_CLASS_WEAK);
+                #endif
+                    return o;
+                }
+
+                // hidden behind scene geometry before the ray reaches any region: pass 0 shows the scene
+                float sceneEye = SceneEyeDepth(uv);
+                if (sceneEye < 1e30 && sceneEye / max(dot(dir, -UNITY_MATRIX_V[2].xyz), 1e-4) < tFirst)
                     return o;
 
+                g_bhSkipFirstColor = true;   // first visible crossing is re-shaded at full res
                 ChainResult cr;
                 TraceChain(dir, count, camHole, cr);
                 o.t0 = float4(cr.emAll - cr.emFirst, cr.T);

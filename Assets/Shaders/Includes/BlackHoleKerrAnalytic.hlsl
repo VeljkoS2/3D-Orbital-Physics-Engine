@@ -49,6 +49,11 @@
 float4 _BHHotSpots[9 * DISK_HOTSPOTS_MAX]; // per spot: (orbit radius, angle, brightness, radial size)
 float4 _BHHotSpotBounds[9]; // per hole: (rMin, rMax) of the ring where spots are
 
+// Low-res trace only (set in FragLow): the first visible disk crossing is re-shaded at full
+// resolution, so here only its opacity is needed.
+static bool g_bhSkipFirstColor = false;
+static bool g_bhOpacityOnly = false;
+
 // ------------------------------------------------------------------
 // LUTs (baked by KerrEllipticLUTGenerator.cs -- keep sizes in sync)
 // ------------------------------------------------------------------
@@ -1534,6 +1539,12 @@ void ShadeOwnDiskCrossing(
     float diskOpacity = (1.0 - exp(-tau)) * orderFade;
     if (diskOpacity < 0.001)
         return;
+    [branch]
+    if (g_bhOpacityOnly)
+    {
+        op = diskOpacity; // em stays 0; opacity doesn't depend on the colour terms below
+        return;
+    }
 
     float turbulence = (crossingIndex < 2)
         ? DiskTurbulence(rTex, phiTex, OmegaTex, drdtTex, hd.life,
@@ -1806,12 +1817,23 @@ void AccumulateDiskCrossings(
             float3 accBefore = acc.color;
             float tBefore = acc.transmittance;
 
+            g_bhOpacityOnly = g_bhSkipFirstColor && !acc.hasFirst;
             ShadeKerrDiskCrossing(
                 rCross, phiCross, xiPhys, acc.crossingCount, dc.aPhys, dc.keplerFactor,
                 dc.diskOutNorm, dc.hd,
                 _Noise, sampler_Noise, dc.rotOffset, dc.genPhase,
                 dc.plungeOn, photonPr, dc.ap1, dc.ap2, 0.0,
                 acc.color, acc.transmittance, acc.firstDopplerG);
+            g_bhOpacityOnly = false;
+
+            if (!acc.hasFirst && acc.transmittance < tBefore)
+            {
+                acc.hasFirst = true;
+                acc.firstCross = float4(rCross, phiCross, xiPhys, photonPr);
+                acc.firstIdx = (float) acc.crossingCount;
+                acc.emFirst = acc.color - accBefore;
+                g_bhSkipFirstColor = false;
+            }
 
             // First crossing that actually shows (re-shaded at full res later)
             if (!acc.hasFirst && acc.transmittance < tBefore)

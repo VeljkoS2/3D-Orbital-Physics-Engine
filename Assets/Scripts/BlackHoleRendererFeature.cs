@@ -55,6 +55,7 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
         static readonly int LowSizeId = Shader.PropertyToID("_BHLowSize");
         static readonly int DownsampleId = Shader.PropertyToID("_BHDownsample");
         static readonly int LensCoverageId = Shader.PropertyToID("_BHLensCoverage");
+        static readonly int FullSizeId = Shader.PropertyToID("_BHFullSize");
 
         // Shader pass indices
         const int CompositePass = 0;   // light: early-outs, weak-only, reconstruction; marks stencil
@@ -69,6 +70,8 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
         class TracePassData
         {
             public TextureHandle source;
+            public Vector4 lowSize, fullSize;
+            public float downsample;
             public Material material;
         }
 
@@ -77,6 +80,7 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
             public TextureHandle source;
             public TextureHandle low0, low1, low2;
             public Vector4 lowSize;
+            public Vector4 fullSize;
             public float downsample;
             public Material material;
         }
@@ -156,14 +160,24 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                 {
                     passData.source = srcColor;
                     passData.material = settings.lensingMaterial;
+                    passData.lowSize = new Vector4(lowW, lowH, 1f / lowW, 1f / lowH);
+                    passData.fullSize = new Vector4(fullW, fullH, 1f / fullW, 1f / fullH);
+                    passData.downsample = ds;
 
                     builder.UseTexture(srcColor);
+                    builder.UseTexture(resourceData.cameraDepthTexture);   // occlusion test (GPU 4)
                     builder.SetRenderAttachment(low0, 0);
                     builder.SetRenderAttachment(low1, 1);
                     builder.SetRenderAttachment(low2, 2);
 
                     builder.SetRenderFunc((TracePassData data, RasterGraphContext context) =>
-                        Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, TraceLowResPass));
+                    {
+                        // pass 1 needs these now (before, only pass 0 set them, which runs later)
+                        data.material.SetVector(LowSizeId, data.lowSize);
+                        data.material.SetVector(FullSizeId, data.fullSize);
+                        data.material.SetFloat(DownsampleId, data.downsample);
+                        Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, TraceLowResPass);
+                    });
                 }
             }
 
@@ -176,6 +190,7 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                 passData.low1 = low1;
                 passData.low2 = low2;
                 passData.lowSize = new Vector4(lowW, lowH, 1f / lowW, 1f / lowH);
+                passData.fullSize = new Vector4(fullW, fullH, 1f / fullW, 1f / fullH);
                 passData.downsample = ds;
 
                 builder.UseTexture(srcColor);
@@ -199,6 +214,7 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                         data.material.SetVector(LowSizeId, data.lowSize);
                     }
                     data.material.SetFloat(DownsampleId, data.downsample);
+                    data.material.SetVector(FullSizeId, data.fullSize);
                     Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, CompositePass);
                 });
             }
