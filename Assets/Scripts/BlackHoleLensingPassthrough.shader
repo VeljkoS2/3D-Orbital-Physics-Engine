@@ -20,6 +20,16 @@ Shader "Custom/BlackHoleLensingPassthrough"
         //    Kerr, red = isolated exact Kerr, magenta = other
         #define BH_DEBUG_PATH 0
         static float g_dbgTraces = 0.0;
+        static bool g_bhLowRes = false;   // set in FragLow
+
+        #define BH_DEBUG_CAMREGION 0
+        #define BH_GROUP_WEAK 1   // exact 1st-3rd order weak bend for close groups (0 = old)
+
+        // 1: show why reconstruction failed (only meaningful with post-processing off):
+        //    red = class differs, grey = neighbour not traced, yellow = transmittance,
+        //    magenta = direction spread, cyan = twist, blue = disk radius, white = disk angle
+        #define BH_DEBUG_RECON 0
+        static int g_reconFail = 0;
 
         int _BHCount;
         float4 _BHSpins[8];               // x = spin a/M, y = Kepler factor, z = 1 if member of a close group, w = 1 if disk on
@@ -156,6 +166,104 @@ Shader "Custom/BlackHoleLensingPassthrough"
             return ki;
         }
 
+                // 2nd-order bend (+ end displacement) of a straight segment from its own start, for a
+        // mass term of weight w (rs^2, or 2 rs_i rs_j for a pair cross term) centred at c
+        void SecondOrderKick(float3 p, float3 d, float t1, float3 c, float w, inout float3 kick, inout float3 disp)
+        {
+            float3 cc = c - p;
+            float tca = dot(cc, d);
+            float3 pOff = tca * d - cc;
+            float b = max(length(pOff), 1e-6);
+            float3 away = pOff / b;
+            float ib2 = 1.0 / (b * b);
+            float s0 = -tca;
+            float r0 = sqrt(tca * tca + b * b);
+            float G0 = -15.0 / 16.0 * atan(s0 / b) * ib2 + s0 / (16.0 * b * r0 * r0);
+            float G1;
+            if (t1 > 1e30)
+                G1 = -15.0 * PI / 32.0 * ib2 + 1.0 / (b * r0);
+            else
+            {
+                float s1 = t1 - tca;
+                float r1 = sqrt(s1 * s1 + b * b);
+                float ir13 = 1.0 / (r1 * r1 * r1);
+                G1 = -15.0 / 16.0 * atan(s1 / b) * ib2 - 15.0 * s1 / (16.0 * b * r1 * r1)
+                   + s1 * (2.0 * b * b + s1 * s1) * ir13 / (b * r0) - b * s0 * ir13 / r0;
+                float K0 = -15.0 / 16.0 * s0 * atan(s0 / b) * ib2;
+                float K1 = -15.0 / 16.0 * s1 * atan(s1 / b) * ib2 + s1 * (s1 - s0) / (b * r0 * r1);
+                disp += w * (K1 - K0 - G0 * (s1 - s0)) * away;
+            }
+            kick += w * (G1 - G0) * away;
+        }
+
+        // antiderivative of the exact 3rd-order bend, b = 1, fresh start at u0
+        float F3(float u, float u0)
+        {
+            float iR = rsqrt(1.0 + u * u), iR0 = rsqrt(1.0 + u0 * u0);
+            float iR2 = iR * iR, iR3 = iR2 * iR, iR4 = iR2 * iR2, iR5 = iR4 * iR, iR02 = iR0 * iR0;
+            float n = -64.0 * u * iR + 7.0 * u * iR * iR02 + 30.0 * u * iR2 * iR0 - 32.0 * u * iR3
+                    + 7.0 * u * iR3 * iR02 - 31.0 * u0 * iR3 * iR02 + 30.0 * u * iR4 * iR0
+                    - 30.0 * u0 * iR4 * iR0 + 24.0 * u * iR5 - 48.0 * u * iR5 * iR02 + 48.0 * u0 * iR5 * iR02;
+            return atan(u) * (15.0 / 8.0 * iR0 + 15.0 / 16.0 * iR3) - 15.0 / 16.0 * atan(u0) * iR3 + n / 16.0;
+        }
+
+        // 3rd order (exact from the segment start) + 4th order of a group's total mass rsT at c
+        void GroupHighOrder(float3 p, float3 d, float t1, float3 c, float rsT, inout float3 kick)
+        {
+            float3 cc = c - p;
+            float tca = dot(cc, d);
+            float3 pOff = tca * d - cc;
+            float b = max(length(pOff), 1e-6);
+            float3 away = pOff / b;
+            float x = rsT / b;
+            float u0 = -tca / b;
+            float R0 = sqrt(1.0 + u0 * u0);
+            bool toInf = (t1 > 1e30);
+            float u1 = toInf ? 0.0 : (t1 - tca) / b;
+            float F1 = toInf ? (15.0 * PI / (16.0 * R0) - 4.0 + 7.0 / (16.0 * R0 * R0)) : F3(u1, u0);
+            float y1p = toInf ? -(1.0 - u0 / R0) : -(u1 * rsqrt(1.0 + u1 * u1) - u0 / R0);
+            float a3 = F1 - F3(u0, u0) - y1p * y1p * y1p / 3.0;   // tan -> angle at 3rd order
+            float P0 = u0 * (3.0 + 2.0 * u0 * u0) / (4.0 * R0 * R0 * R0);
+            float R1 = sqrt(1.0 + u1 * u1);
+            float P1 = toInf ? 0.5 : u1 * (3.0 + 2.0 * u1 * u1) / (4.0 * R1 * R1 * R1);
+            kick += (x * x * x * a3 - (3465.0 * PI / 1024.0) * x * x * x * x * (P1 - P0)) * away;
+        }
+
+        // weak bend of the group members in gMask on the segment p + t d, t in [0, t1]
+        void GroupWeakKick(float3 p, float3 d, float t1, int count, uint gMask, out float3 kick, out float3 disp)
+        {
+            kick = float3(0, 0, 0);
+            disp = float3(0, 0, 0);
+            [loop]
+            for (int i = 0; i < count; i++)
+            {
+                if (((gMask >> (uint)i) & 1u) == 0u) continue;
+                float rsI = _BHParams[i].x;
+                float3 Pi = _BHPositionsCamRelative[i].xyz;
+                float3 kw, dw;
+                WeakKick(d, Pi - p, rsI, SpinJ(i), t1, 3.0e38, kw, dw);   // 1st order + spin only
+                kick += kw;
+                disp += dw;
+                SecondOrderKick(p, d, t1, Pi, rsI * rsI, kick, disp);
+                float rsT = rsI;
+                float3 cSum = rsI * Pi;
+                bool firstOfGroup = true;
+                [loop]
+                for (int j = 0; j < count; j++)
+                {
+                    if (j == i || ((gMask >> (uint)j) & 1u) == 0u || _BHSpins[j].z != _BHSpins[i].z) continue;
+                    float rsJ = _BHParams[j].x;
+                    float3 Pj = _BHPositionsCamRelative[j].xyz;
+                    if (j > i) SecondOrderKick(p, d, t1, 0.5 * (Pi + Pj), 2.0 * rsI * rsJ, kick, disp);
+                    else firstOfGroup = false;
+                    rsT += rsJ;
+                    cSum += rsJ * Pj;
+                }
+                if (firstOfGroup)
+                    GroupHighOrder(p, d, t1, cSum / rsT, rsT, kick);
+            }
+        }
+
         float SceneEyeDepth(float2 uv)
         {
             float raw = SampleSceneDepth(uv);
@@ -279,15 +387,26 @@ Shader "Custom/BlackHoleLensingPassthrough"
             return tFirst;
         }
 
-        // Ray that never enters a region: every hole's weak bend to infinity, each on
-        // the line as bent by the others (see CoupledWeakKick).
         float3 WeakOnlyDir(float3 dir, int count)
         {
             uint allMask = (1u << (uint)count) - 1u;
             float3 kick = float3(0, 0, 0);
+        #if BH_GROUP_WEAK
+            uint gMask = 0u;
+            [loop]
+            for (int g = 0; g < count; g++)
+                if (_BHSpins[g].z > 0.5) gMask |= 1u << (uint)g;
+            float3 disp;
+            GroupWeakKick(float3(0, 0, 0), dir, 3.0e38, count, gMask, kick, disp);
+            [loop]
+            for (int w = 0; w < count; w++)
+                if (_BHSpins[w].z <= 0.5)
+                    kick += CoupledWeakKick(w, float3(0, 0, 0), dir, count, allMask, true, false);
+        #else
             [loop]
             for (int w = 0; w < count; w++)
                 kick += CoupledWeakKick(w, float3(0, 0, 0), dir, count, allMask, true, false);
+        #endif
             return ApplyKick(dir, kick);
         }
 
@@ -331,7 +450,10 @@ Shader "Custom/BlackHoleLensingPassthrough"
             int idx = cr.cbdN;
             cr.cbdN++;
             float op;
+            // reduced res: the first visible emission is re-shaded at full res -> opacity only
+            g_bhOpacityOnly = g_bhLowRes && !anyEm;
             float3 em = ShadeCBDAt(s.x, s.y, s.z, s.w, idx, 0.0, _BHCBD2.w, _BHNoise, sampler_BHNoise, op);
+            g_bhOpacityOnly = false;
             if (op <= 0.0)
                 return;
             if (!anyEm)
@@ -438,10 +560,10 @@ Shader "Custom/BlackHoleLensingPassthrough"
         // Tested (single hole, 40 Rs region): 0.26 px error where the image is not
         // strongly lensed, 0.05 px between neighbouring rays (no banding), 7 steps per
         // ray (was 12). Merger-mode rays skimming a photon sphere: ~1 px on screen.
-        #define BH_MED_STEP_NEAR   0.12
-        #define BH_MED_STEP_FAR    0.35
-        #define BH_MED_STEP_GROW   0.12
-        #define BH_MED_MAX_STEPS   320
+        #define BH_MED_STEP_NEAR   0.96
+        #define BH_MED_STEP_FAR    1.5
+        #define BH_MED_STEP_GROW   0.96
+        #define BH_MED_MAX_STEPS   128
         #define BH_GRAVITOMAGNETIC 1
         #define BH_QUADRUPOLE 1
 
@@ -717,11 +839,31 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     CBDRay(p, d, tEnd, count, cr, anyEm);
                     if (cr.T < 0.01) { stopped = true; break; }
 
-                    // segments touching a group: its members' higher-order bending
-                    // happens inside the group region, not here
                     bool touchMed = tMember || fromMedium;
                     float3 kick = float3(0, 0, 0);
                     float3 disp = float3(0, 0, 0);
+                #if BH_GROUP_WEAK
+                    uint gMask = 0u;
+                    [loop]
+                    for (int g = 0; g < count; g++)
+                        if (((mask >> (uint)g) & 1u) != 0u && IsMember(g)) gMask |= 1u << (uint)g;
+                    GroupWeakKick(p, d, tEnd, count, gMask, kick, disp);
+                    [loop]
+                    for (int w = 0; w < count; w++)
+                    {
+                        if (((done >> (uint)w) & 1u) != 0u || IsMember(w) || w == target) continue;
+                        float3 kw, dw;
+                        if (target < 0)
+                        {
+                            kw = CoupledWeakKick(w, p, d, count, mask, firstSeg, touchMed);
+                            dw = float3(0, 0, 0);
+                        }
+                        else
+                            WeakKick(d, _BHPositionsCamRelative[w].xyz - p, _BHParams[w].x, SpinJ(w), tEnd, 0.0, kw, dw);
+                        kick += kw;
+                        disp += dw;
+                    }
+                #else
                     [loop]
                     for (int w = 0; w < count; w++)
                     {
@@ -729,8 +871,6 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         float3 kw, dw;
                         if (target < 0)
                         {
-                            // last segment, out to infinity: coupled bends (no seam at the
-                            // region edges of the holes this ray just missed)
                             kw = CoupledWeakKick(w, p, d, count, mask, firstSeg, touchMed);
                             dw = float3(0, 0, 0);
                         }
@@ -742,6 +882,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         kick += kw;
                         disp += dw;
                     }
+                #endif
                     fromMedium = false;
                     float3 newDir = ApplyKick(d, kick);
                     if (target < 0)
@@ -812,13 +953,17 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     float3 bhPos = _BHPositionsCamRelative[h].xyz;
                     float3 toBH = bhPos - p;
                     float3 dT = d;
-                    if (!kFromCam)
+                    // Group traces (kFinite) live in isotropic coordinates with static-frame
+                    // directions: convert to BL / ZAMO for the exact trace, also when the trace
+                    // starts at the camera. Only the first straight segment to a separate hole
+                    // (kFromCam && !kFinite) keeps the single-hole convention.
+                    if (!kFromCam || kFinite)
                     {
                         float rho = length(toBH) / rs;
                         toBH *= IsoToBL(rho) / rho;
-                        if (kFinite)
-                            dT = StaticToZamo(d, ZamoVelocity(h, p));
                     }
+                    if (kFinite)
+                        dT = StaticToZamo(d, ZamoVelocity(h, p));
                     float rOuter = kFinite ? IsoToBL(_BHParams[h].y) : 1e30;
                     float escR = kFinite ? rOuter : _BHParams[h].w;
 
@@ -940,6 +1085,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
         bool Reconstruct(float2 uv, out float3 color)
         {
             color = 0;
+            g_reconFail = 0;
             float2 p = uv * _BHLowSize.xy - 0.5;
             int2 i0 = (int2) floor(p);
             float2 f = p - (float2) i0;
@@ -954,9 +1100,9 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float4 b01 = _BHLow1.Load(int3(c01, 0));
             float4 b11 = _BHLow1.Load(int3(c11, 0));
 
-            if (b00.w != b10.w || b00.w != b01.w || b00.w != b11.w) return false;
+            if (b00.w != b10.w || b00.w != b01.w || b00.w != b11.w) { g_reconFail = 1; return false; }
             float cls = b00.w;
-            if (cls < 32.0) return false;
+            if (cls < 32.0) { g_reconFail = 2; return false; }
             bool captured = (fmod(cls, 2.0) >= 1.0);
             bool hasFirst = (fmod(floor(cls / 2.0), 2.0) >= 1.0);
             float firstIdx = fmod(floor(cls / 4.0), 8.0);
@@ -968,23 +1114,22 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float4 a11 = _BHLow0.Load(int3(c11, 0));
             float tMin = min(min(a00.a, a10.a), min(a01.a, a11.a));
             float tMax = max(max(a00.a, a10.a), max(a01.a, a11.a));
-            if (tMax - tMin > BH_UPS_MAX_DT) return false;
+            if (tMax - tMin > BH_UPS_MAX_DT) { g_reconFail = 3; return false; }
+
+            // Sky hidden behind opaque emission in all four texels: its direction never
+            // reaches the screen, so it must not decide whether this cell is rebuilt.
+            bool skyVisible = !captured && tMax >= 0.01;
 
             float3 dir = 0;
             float skyFoot = 0.0;
-            if (!captured)
+            if (skyVisible)
             {
                 float texelAngle = 2.0 / (UNITY_MATRIX_P[1][1] * _BHLowSize.y);
                 float cosMax = cos(BH_UPS_MAX_SPREAD * texelAngle);
                 float dMin = min(min(dot(b00.xyz, b10.xyz), dot(b00.xyz, b01.xyz)),
                                  min(dot(b11.xyz, b10.xyz), dot(b11.xyz, b01.xyz)));
-                if (dMin < cosMax) return false;
+                if (dMin < cosMax) { g_reconFail = 4; return false; }
 
-                // Bilinear interpolation error is about |twist| / 4 in sky angle, which
-                // is |twist| / (4 x sky angle per pixel) in SCREEN pixels. Accept the cell
-                // if that stays under a quarter pixel: where lensing squeezes the sky, a
-                // large sky error is still a tiny shift on screen; where it magnifies,
-                // the test gets stricter.
                 float pixAngle = 2.0 / (UNITY_MATRIX_P[1][1] * _ScreenParams.y);
                 float l1 = length(b10.xyz - b00.xyz);
                 float l2 = length(b01.xyz - b00.xyz);
@@ -992,7 +1137,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 float perPixMax = max(l1, l2) / _BHDownsample;
                 float3 twist = (b00.xyz + b11.xyz) - (b10.xyz + b01.xyz);
                 float twistMax = BH_UPS_MAX_TWIST * perPixMin;
-                if (dot(twist, twist) > twistMax * twistMax) return false;
+                if (dot(twist, twist) > twistMax * twistMax) { g_reconFail = 5; return false; }
 
                 dir = normalize(lerp(lerp(b00.xyz, b10.xyz, f.x), lerp(b01.xyz, b11.xyz, f.x), f.y));
                 skyFoot = max(perPixMax, pixAngle);
@@ -1007,13 +1152,13 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 float4 d11 = _BHLow2.Load(int3(c11, 0));
                 float rMin = min(min(d00.x, d10.x), min(d01.x, d11.x));
                 float rMax = max(max(d00.x, d10.x), max(d01.x, d11.x));
-                if (rMax - rMin > BH_UPS_MAX_DR * rMin) return false;
+                if (rMax - rMin > BH_UPS_MAX_DR * rMin) { g_reconFail = 6; return false; }
                 d10.y = d00.y + WrapPi(d10.y - d00.y);
                 d01.y = d00.y + WrapPi(d01.y - d00.y);
                 d11.y = d00.y + WrapPi(d11.y - d00.y);
                 float phMin = min(min(d00.y, d10.y), min(d01.y, d11.y));
                 float phMax = max(max(d00.y, d10.y), max(d01.y, d11.y));
-                if (phMax - phMin > BH_UPS_MAX_DPHI) return false;
+                if (phMax - phMin > BH_UPS_MAX_DPHI) { g_reconFail = 7; return false; }
                 float4 fc = lerp(lerp(d00, d10, f.x), lerp(d01, d11, f.x), f.y);
 
                 float2 gR = float2(0.5 * ((d10.x - d00.x) + (d11.x - d01.x)),
@@ -1034,7 +1179,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
 
             float4 a = lerp(lerp(a00, a10, f.x), lerp(a01, a11, f.x), f.y);
             color = emFirst + a.rgb;
-            if (!captured && a.a >= 0.01)
+            if (skyVisible && a.a >= 0.01)
                 color += SampleSky(dir, skyFoot) * a.a;
             return true;
         }
@@ -1069,6 +1214,26 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 float3 dir = PixelRayDir(input.texcoord);
                 int count = min(_BHCount, 8);
                 int camHole = CameraHole(count);
+                #if BH_DEBUG_CAMREGION
+                // corner square: blue = camera outside every region, green = inside a
+                // region (combined field starts at the camera), red = inside an exact sphere
+                if (input.texcoord.x < 0.04 && input.texcoord.y < 0.04)
+                {
+                    bool inRegion = false, inExact = false;
+                    [loop]
+                    for (int c = 0; c < count; c++)
+                    {
+                        float3 toC = _BHPositionsCamRelative[c].xyz;
+                        float d2 = dot(toC, toC);
+                        float Rr = DomainRadius(c);
+                        float Re = _BHParams[c].x * _BHParams[c].y;
+                        inRegion = inRegion || (d2 < Rr * Rr);
+                        inExact = inExact || (d2 < Re * Re);
+                    }
+                    float3 tint = inExact ? float3(1, 0.3, 0.2) : (inRegion ? float3(0.2, 1, 0.3) : float3(0.2, 0.4, 1));
+                    return float4(tint, 1);
+                }
+            #endif
 
                 float3 camFwd0 = -UNITY_MATRIX_V[2].xyz;
                 float sceneEye = SceneEyeDepth(input.texcoord);
@@ -1136,6 +1301,16 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     #endif
                         return float4(ObserverShift(rec), 1);
                     }
+                #if BH_DEBUG_RECON
+                    float3 rc = (g_reconFail == 1) ? float3(1, 0, 0)
+                              : (g_reconFail == 2) ? float3(0.4, 0.4, 0.4)
+                              : (g_reconFail == 3) ? float3(1, 1, 0)
+                              : (g_reconFail == 4) ? float3(1, 0, 1)
+                              : (g_reconFail == 5) ? float3(0, 1, 1)
+                              : (g_reconFail == 6) ? float3(0, 0, 1)
+                              :                      float3(1, 1, 1);
+                    return float4(rc, 1);
+                #endif
                 }
 
                 discard;
@@ -1174,8 +1349,18 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 int count = min(_BHCount, 8);
                 int camHole = CameraHole(count);
                 if (FirstDomainEntry(dir, count, camHole) > 1e30)
+                {
+                #if defined(BH_SINGLE)
+                    // Outside the region: write the weak-field direction with the class of an escaping
+                    // single-hole trace that crossed no disk (traces = 1 -> 32, firstHole = 0 -> 512).
+                    // Cells straddling the region edge then match and reconstruct, instead of all
+                    // failing the class test and going to the full-res trace.
+                    o.t1 = float4(WeakOnlyDir(dir, count), 544.0);
+                #endif
                     return o;
+                }
 
+                g_bhLowRes = true;
                 ChainResult cr;
                 TraceChain(dir, count, camHole, cr);
                 o.t0 = float4(cr.emAll - cr.emFirst, cr.T);

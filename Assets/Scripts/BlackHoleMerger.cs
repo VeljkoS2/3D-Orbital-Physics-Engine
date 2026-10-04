@@ -44,7 +44,7 @@ public static class BlackHoleMerger
                 Properties pj = bodies[j].GetComponent<Properties>();
                 if (pj.type != 3) continue;
                 double r = math.length(pj.worldPosition - pi.worldPosition);
-                if (r > pi.radius + pj.radius) continue;
+                if (r > pi.radius*0.9 + pj.radius*0.9) continue;
 
                 bool iKeeps = pi.mass >= pj.mass;
                 Merge(iKeeps ? bodies[i] : bodies[j], iKeeps ? bodies[j] : bodies[i], bodies, manager, recoil);

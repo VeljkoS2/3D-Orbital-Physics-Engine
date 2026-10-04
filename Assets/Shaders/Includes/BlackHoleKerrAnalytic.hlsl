@@ -49,6 +49,9 @@
 float4 _BHHotSpots[9 * DISK_HOTSPOTS_MAX]; // per spot: (orbit radius, angle, brightness, radial size)
 float4 _BHHotSpotBounds[9]; // per hole: (rMin, rMax) of the ring where spots are
 
+// set around one shading call: compute only the opacity (its colour is thrown away)
+static bool g_bhOpacityOnly = false;
+
 // ------------------------------------------------------------------
 // LUTs (baked by KerrEllipticLUTGenerator.cs -- keep sizes in sync)
 // ------------------------------------------------------------------
@@ -1534,6 +1537,12 @@ void ShadeOwnDiskCrossing(
     float diskOpacity = (1.0 - exp(-tau)) * orderFade;
     if (diskOpacity < 0.001)
         return;
+    [branch]
+    if (g_bhOpacityOnly)
+    {
+        op = diskOpacity; // em stays 0; opacity doesn't depend on the colour terms below
+        return;
+    }
 
     float turbulence = (crossingIndex < 2)
         ? DiskTurbulence(rTex, phiTex, OmegaTex, drdtTex, hd.life,
@@ -1617,7 +1626,7 @@ float3 ShadeCBDAt(float rW, float phi, float nR, float nPhi, int idx, float lod,
     float opE = 0.0, opF = 0.0;
 
     [branch]
-    if (p < 1.0)
+    if (p < 0.999)
     {
         float rIn = _BHCBD0.w;
         float rOut = _BHCBD1.w;
@@ -1637,28 +1646,35 @@ float3 ShadeCBDAt(float rW, float phi, float nR, float nPhi, int idx, float lod,
                 float edge = smoothstep(0.5 * rIn, 1.1 * rIn, rW)
                            * smoothstep(rOut, rOut - 0.25 * (rOut - rIn), rW);
                 opE = 0.99 * edge;
-                float rT = 6.0 * rW / rIn;
-                float omegaT = pow(rIn / rW, 1.5);
-                float turb = DiskTurbulence(rT, phi, omegaT, 0.0, DISK_NOISE_LIFE_ORBITS * TWO_PI,
-                                            _BHCBD5.yz, 0.0, _BHCBD5.x, lod, _Noise, sampler_Noise);
-                float clump = (turb - 0.5) * 2.0 * _BHCBD3.w;
-                float density = max(1.0 + clump, 0.05);
-                float xr = rIn / max(rW, rIn);
-                float flux = xr * xr * xr;
-                float Temit = _BHCBD2.y * sqrt(sqrt(flux)) * (1.0 + 0.12 * clump);
-                float Tobs = Temit * lerp(1.0, g, _BHCBD3.x);
-                float bright = _BHCBD2.z * exp2(_BHCBD3.z * log2(flux) + 4.0 * _BHCBD3.y * log2(max(g, 1e-4)));
-                float mu = sqrt(saturate(1.0 - nR * nR - nPhi * nPhi));
-                float limb = (1.0 + 2.06 * mu) / 2.03;
-                float3 col = BlackbodyColor(Tobs) * (bright * density * limb);
-                col = lerp(col, dot(col, float3(0.2126, 0.7152, 0.0722)) * _BHCBD4.rgb, _BHCBD4.a);
-                emE = col * opE;
+                [branch]
+                if (!g_bhOpacityOnly)
+                {
+                    float rT = 6.0 * rW / rIn;
+                    float omegaT = pow(rIn / rW, 1.5);
+                    // like the holes' disks: texture only on the first two images
+                    float turb = (idx < 2)
+                        ? DiskTurbulence(rT, phi, omegaT, 0.0, DISK_NOISE_LIFE_ORBITS * TWO_PI,
+                                         _BHCBD5.yz, 0.0, _BHCBD5.x, lod, _Noise, sampler_Noise)
+                        : _BHNoiseMean;
+                    float clump = (turb - 0.5) * 2.0 * _BHCBD3.w;
+                    float density = max(1.0 + clump, 0.05);
+                    float xr = rIn / max(rW, rIn);
+                    float flux = xr * xr * xr;
+                    float Temit = _BHCBD2.y * sqrt(sqrt(flux)) * (1.0 + 0.12 * clump);
+                    float Tobs = Temit * lerp(1.0, g, _BHCBD3.x);
+                    float bright = _BHCBD2.z * exp2(_BHCBD3.z * log2(flux) + 4.0 * _BHCBD3.y * log2(max(g, 1e-4)));
+                    float mu = sqrt(saturate(1.0 - nR * nR - nPhi * nPhi));
+                    float limb = (1.0 + 2.06 * mu) / 2.03;
+                    float3 col = BlackbodyColor(Tobs) * (bright * density * limb);
+                    col = lerp(col, dot(col, float3(0.2126, 0.7152, 0.0722)) * _BHCBD4.rgb, _BHCBD4.a);
+                    emE = col * opE;
+                }
             }
         }
     }
 
     [branch]
-    if (p > 0.0)
+    if (p > 0.001)
     {
         // the same cavity as the early look, closing with the separation; 0 at the end of
         // the plunge, so nothing is cut from the remnant's disk at the switch

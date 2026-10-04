@@ -23,7 +23,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
     public float innerKerrRadiusSlowRs = 3f;
     public float innerKerrRadiusFastRs = 12f;
     [Tooltip("Minimum radius (Rs) of the combined-field region around a group (40: ~0.15 px at its edge, 30: ~0.5 px).")]
-    public float groupRadiusRs = 40f;
+    public float groupRadiusRs = 35f;
     [Tooltip("Debug: send single holes through the combined-field integrator too.")]
     public bool debugForceMedium = false;
 
@@ -62,6 +62,9 @@ public class BlackHoleGlobalManager : MonoBehaviour
     Vector4 cbd9, cbd10, cbd11;
     readonly HoleState finalDisk = new HoleState();
     int finalRowVersion = -1;
+
+    readonly int[] groupRoot = new int[MaxBlackHoles];
+    int FindRoot(int i) { while (groupRoot[i] != i) i = groupRoot[i]; return i; }
 
     static readonly int BHCountId = Shader.PropertyToID("_BHCount");
     static readonly int BHPositionsId = Shader.PropertyToID("_BHPositionsCamRelative");
@@ -995,6 +998,15 @@ public class BlackHoleGlobalManager : MonoBehaviour
         // ---- pass B: membership, redshift, disk fade, shader data -----------------
         bool lutDirty = false;
         int survivorIndex = -1;
+        // close groups: holes linked by the same region-overlap test as membership
+        for (int i = 0; i < count; i++) groupRoot[i] = i;
+        for (int i = 0; i < count; i++)
+            for (int j = i + 1; j < count; j++)
+                if (Vector3.Distance(holePos[i], holePos[j]) < holeIsolated[i] * holeRs[i] + holeIsolated[j] * holeRs[j])
+                {
+                    int a = FindRoot(i), b = FindRoot(j);
+                    if (a != b) groupRoot[Mathf.Max(a, b)] = Mathf.Min(a, b);
+                }
         for (int i = 0; i < count; i++)
         {
             var st = packed[i];
@@ -1037,7 +1049,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
             double genInt = System.Math.Floor(st.genPhase);
             rotationOffsets[i] = new Vector4(st.textureAngle, (float)(st.genPhase - genInt), (float)genInt, 0);
             FillHotSpots(i, bh, bp, st);
-            spins[i] = new Vector4(bh.spin, bh.diskRotation, member ? 1f : 0f, diskOn ? 1f : 0f);
+            spins[i] = new Vector4(bh.spin, bh.diskRotation, member ? FindRoot(i) + 1f : 0f, diskOn ? 1f : 0f);
 
             float m = 0.5f * rs;
             float jMag = Mathf.Clamp(bh.spin, -0.998f, 0.998f) * m * m;
