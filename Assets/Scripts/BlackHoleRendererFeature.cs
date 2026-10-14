@@ -41,6 +41,11 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
         // close setting is used.
         [Range(0f, 1f)] public float closeCoverageThreshold = 0.35f;
 
+        // The reduced-resolution traces are never taller than this (pixels): bigger windows
+        // automatically use a stronger downsample, so the cost stops growing with window size.
+        // 0 = off (the settings above only).
+        [Min(0)] public int maxTraceHeight = 600;
+
         // The Scene view is a second camera: with it open, the whole effect runs twice.
         public bool renderInSceneView = false;
     }
@@ -70,6 +75,7 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
         {
             public TextureHandle source;
             public Material material;
+            public float downsample;
         }
 
         class CompositePassData
@@ -138,9 +144,11 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
             int dsWanted = coverage > settings.closeCoverageThreshold
                 ? settings.traceDownsampleClose
                 : settings.traceDownsample;
-            int ds = Mathf.Clamp(dsWanted, 1, 4);
             int fullW = cameraData.cameraTargetDescriptor.width;
             int fullH = cameraData.cameraTargetDescriptor.height;
+            if (settings.maxTraceHeight > 0)
+                dsWanted = Mathf.Max(dsWanted, Mathf.CeilToInt(fullH / (float)settings.maxTraceHeight));
+            int ds = Mathf.Clamp(dsWanted, 1, 4);
             int lowW = Mathf.Max(1, (fullW + ds - 1) / ds);
             int lowH = Mathf.Max(1, (fullH + ds - 1) / ds);
 
@@ -156,6 +164,7 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                 {
                     passData.source = srcColor;
                     passData.material = settings.lensingMaterial;
+                    passData.downsample = ds;
 
                     builder.UseTexture(srcColor);
                     builder.SetRenderAttachment(low0, 0);
@@ -163,7 +172,10 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                     builder.SetRenderAttachment(low2, 2);
 
                     builder.SetRenderFunc((TracePassData data, RasterGraphContext context) =>
-                        Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, TraceLowResPass));
+                    {
+                        data.material.SetFloat(DownsampleId, data.downsample);
+                        Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, TraceLowResPass);
+                    });
                 }
             }
 

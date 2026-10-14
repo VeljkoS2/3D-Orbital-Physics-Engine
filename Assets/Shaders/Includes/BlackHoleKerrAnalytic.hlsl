@@ -1185,11 +1185,6 @@ float4 _BHDiskConst1[9];
 float4 _BHDiskTint[9]; // rgb: tint colour (linear, luminance 1), w: strength 0..1
 float4 _BHDiskCut[9]; // x = 1 - visibility of the hole's own disk (tides; C#), 0 = full
 float _BHNoiseMean; // mean of the noise texture's red channel (CPU)
-#define BH_FINAL_SLOT 8  // disk slot holding the merged hole's future disk (C#)
-float4 _BHCBD9; // final look: the remnant's ap1 (peak T, Doppler colour, beaming, contrast)
-float4 _BHCBD10; // final look: the remnant's ap2 (brightness, stress, turbulence, higher-order fade)
-float4 _BHCBD11; // final look: x Kepler factor, y outer radius (Rs of the remnant, BL),
-                  //z cavity radius (world, isotropic) = cbdCavity x separation
 Texture2D<float2> _BHPlungeLUT;
 #define BH_PLUNGE_LUT_W 64.0    // must match PlungeLutWidth in C#
 #define BH_PLUNGE_LUT_H 9.0     // = MaxBlackHoles
@@ -1448,23 +1443,6 @@ float DiskHotSpots(int h, float r, float phi)
     }
     return spot;
 }
-// ==================================================================
-// Circumbinary (shared) disk. Two looks, blended by how far the cavity has closed:
-//  early: cool, dim gas around a wide binary (T ~ r^-3/4 from the cavity edge)
-//  final: exactly the merged hole's future disk (same formulas and inputs, spin 0)
-// At the merger the blend is 1, so the hand-over is between identical-looking disks.
-// ==================================================================
-float4 _BHCBD0; // xyz centre (camera-relative), w cavity edge (world, isotropic)
-float4 _BHCBD1; // xyz unit normal, w outer radius (world, isotropic)
-float4 _BHCBD2; // x mass for the orbital speed (world), y early inner-edge temperature (K), z early brightness, w weight (0 = off)
-float4 _BHCBD3; // x Doppler colour, y Doppler beaming, z radial contrast, w turbulence (both looks)
-float4 _BHCBD4; // rgb tint (linear, luminance 1), a tint strength (both looks)
-float4 _BHCBD5; // early clock: x texture angle, y clock fraction, z clock integer part
-float4 _BHCBD6; // final: x peak temperature (K), y brightness, z ISCO stress, w flux normalisation (1 / peak)
-float4 _BHCBD7; // final: x Rs of the merged hole (world), y its ISCO (Rs), z structure life (Rs/c), w blend (0 early, 1 final)
-float4 _BHCBD8; // final clock: x texture angle, y clock fraction, z clock integer part
-float4 _BHCBDBlend; // after a merger: x weight of the shared disk at the remnant's disk crossings
-                    // (1 -> 0), y remnant hole index, z remnant rs (world)
 // A hole's own disk at one crossing: emission (already times opacity), opacity, g.
 void ShadeOwnDiskCrossing(
     float r, float phi, float xiPhys, int crossingIndex, float aPhys, float keplerFactor,
@@ -1603,104 +1581,6 @@ void ShadeKerrDiskCrossing(
         outFirstDopplerG = g;
     accumulatedColor += em * transmittance;
     transmittance *= 1.0 - op;
-}
-
-// Shared disk at one plane crossing.
-//   rW: isotropic radius from the shared disk's centre (world), phi: azimuth in its plane,
-//   nR, nPhi: radial / azimuthal components of the TRACED direction (local, static frame),
-//   idx: how many times this ray crossed the plane before, w: weight.
-// Two looks, blended by how far the cavity has closed (p = _BHCBD7.w):
-//   early: dim, cool, Keplerian around the total mass
-//   final: the merged hole's own disk -- ShadeOwnDiskCrossing on disk slot BH_FINAL_SLOT,
-//          with the crossing converted to exactly the inputs the exact trace would give it
-//          (Boyer-Lindquist r, photon xi and p_r, crossing number). At the end of the
-//          plunge this IS the remnant's disk: same function, same inputs.
-float3 ShadeCBDAt(float rW, float phi, float nR, float nPhi, int idx, float lod, float w,
-                  Texture2D _Noise, SamplerState sampler_Noise, out float opacity)
-{
-    opacity = 0.0;
-    if (w <= 0.0)
-        return float3(0, 0, 0);
-    float p = _BHCBD7.w;
-    float3 emE = float3(0, 0, 0), emF = float3(0, 0, 0);
-    float opE = 0.0, opF = 0.0;
-
-    [branch]
-    if (p < 0.999)
-    {
-        float rIn = _BHCBD0.w;
-        float rOut = _BHCBD1.w;
-        float rsT = 2.0 * _BHCBD2.x;
-        float rho = rW / max(rsT, 1e-6);
-        float rB = rho * (1.0 + 0.25 / rho) * (1.0 + 0.25 / rho); // BL, total-mass Rs
-        if (rW >= 0.5 * rIn && rW <= rOut && rB > 1.5)
-        {
-            // exact circular Schwarzschild orbit: g = sqrt(1 - 3M/r) / (1 - Omega xi)
-            float lapse = sqrt(1.0 - 1.0 / rB);
-            float Om = sqrt(0.5) / (rB * sqrt(rB));
-            float xi = -rB * nPhi / lapse; // physical photon travels along -d
-            float den = 1.0 - Om * xi;
-            float g = (den > 0.0) ? sqrt(1.0 - 1.5 / rB) / den : -1.0;
-            if (g > 0.0)
-            {
-                float edge = smoothstep(0.5 * rIn, 1.1 * rIn, rW)
-                           * smoothstep(rOut, rOut - 0.25 * (rOut - rIn), rW);
-                opE = 0.99 * edge;
-                [branch]
-                if (!g_bhOpacityOnly)
-                {
-                    float rT = 6.0 * rW / rIn;
-                    float omegaT = pow(rIn / rW, 1.5);
-                    // like the holes' disks: texture only on the first two images
-                    float turb = (idx < 2)
-                        ? DiskTurbulence(rT, phi, omegaT, 0.0, DISK_NOISE_LIFE_ORBITS * TWO_PI,
-                                         _BHCBD5.yz, 0.0, _BHCBD5.x, lod, _Noise, sampler_Noise)
-                        : _BHNoiseMean;
-                    float clump = (turb - 0.5) * 2.0 * _BHCBD3.w;
-                    float density = max(1.0 + clump, 0.05);
-                    float xr = rIn / max(rW, rIn);
-                    float flux = xr * xr * xr;
-                    float Temit = _BHCBD2.y * sqrt(sqrt(flux)) * (1.0 + 0.12 * clump);
-                    float Tobs = Temit * lerp(1.0, g, _BHCBD3.x);
-                    float bright = _BHCBD2.z * exp2(_BHCBD3.z * log2(flux) + 4.0 * _BHCBD3.y * log2(max(g, 1e-4)));
-                    float mu = sqrt(saturate(1.0 - nR * nR - nPhi * nPhi));
-                    float limb = (1.0 + 2.06 * mu) / 2.03;
-                    float3 col = BlackbodyColor(Tobs) * (bright * density * limb);
-                    col = lerp(col, dot(col, float3(0.2126, 0.7152, 0.0722)) * _BHCBD4.rgb, _BHCBD4.a);
-                    emE = col * opE;
-                }
-            }
-        }
-    }
-
-    [branch]
-    if (p > 0.001)
-    {
-        // the same cavity as the early look, closing with the separation; 0 at the end of
-        // the plunge, so nothing is cut from the remnant's disk at the switch
-        float rCut = _BHCBD11.z;
-        float cav = (rCut > 1e-6) ? smoothstep(0.5 * rCut, 1.1 * rCut, rW) : 1.0;
-
-        float rho = rW / max(_BHCBD7.x, 1e-6);
-        float r = rho * (1.0 + 0.25 / rho) * (1.0 + 0.25 / rho); // BL, remnant Rs
-        float D = r * r - r; // Delta, spin 0
-        if (cav > 0.0 && D > 0.0)
-        {
-            float lapse = sqrt(1.0 - 1.0 / r);
-            float xiPhys = -r * nPhi / lapse;
-            float photonPr = -r * r * nR / D;
-            float g;
-            ShadeOwnDiskCrossing(r, phi, xiPhys, idx, 0.0, _BHCBD11.x, _BHCBD11.y,
-                                 LoadHoleDisk(BH_FINAL_SLOT), _Noise, sampler_Noise,
-                                 _BHCBD8.x, _BHCBD8.yz, KERR_DISK_PLUNGING != 0, photonPr,
-                                 _BHCBD9, _BHCBD10, lod, emF, opF, g);
-            emF *= cav;
-            opF *= cav;
-        }
-    }
-
-    opacity = lerp(opE, opF, p) * w;
-    return lerp(emE, emF, p) * w;
 }
 
 // ------------------------------------------------------------------
@@ -1846,6 +1726,8 @@ void AccumulateDiskCrossings(
     }
 }
 
+#include "Assets/Shaders/Includes/BlackHoleKerrVolume.hlsl"
+
 // ------------------------------------------------------------------
 // Weak-field sky direction for rays that never enter the analytic sphere.
 // ------------------------------------------------------------------
@@ -1959,8 +1841,15 @@ void KerrTraceCore(
 
     [branch]
     if (diskOn)
+    {
+#if defined(BH_VOLUMETRIC_DISK)
+        AccumulateDiskVolume(thetaMotion, rad, polarCum, polarReady, lambdaPhysicalTotal,
+                             phi, r, xi, eta, a, dc, _Noise, sampler_Noise, acc);
+#else
         AccumulateDiskCrossings(thetaMotion, rad, polarCum, polarReady, lambdaPhysicalTotal,
                                 phi, xi, eta, a, dc, _Noise, sampler_Noise, acc);
+#endif
+    }
 
     hasFirst = acc.hasFirst;
     firstCross = acc.firstCross;

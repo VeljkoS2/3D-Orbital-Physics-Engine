@@ -116,7 +116,7 @@ public static class BlackHoleMerger
         A.mass = Mf;
         A.blackHoleParamaters = bp;
         A.blackHoleAppearanceProperties = Blend(A.blackHoleAppearanceProperties, B.blackHoleAppearanceProperties, (float)(m1 / M));
-        A.radius = bp.schwarzschildRadiusWorld * 1.1;
+        A.radius = bp.schwarzschildRadiusWorld * 0.9;
         A.worldPosition = xcom;
         A.velocity = vcom;
         keep.transform.rotation = Quaternion.FromToRotation(Vector3.up, V3(axisDisk));

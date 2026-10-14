@@ -277,7 +277,11 @@ Shader "Custom/BlackHoleLensingPassthrough"
 
         #define BH_UPS_MAX_SPREAD 8.0   // max direction spread, in low-res texel angles
         #define BH_UPS_MAX_TWIST  1.0   // max interpolation error, in units of 1/4 screen pixel
+    #if defined(BH_VOLUMETRIC_DISK)
+        #define BH_UPS_MAX_DT     0.8   // soft volumetric gas interpolates fine
+    #else
         #define BH_UPS_MAX_DT     0.4
+    #endif
         #define BH_UPS_MAX_DPHI   1.0
         #define BH_UPS_MAX_DR     0.3
 
@@ -328,7 +332,6 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float  firstIdx;
             int    why;
             int    path;      // bits: 1 combined field, 2 exact Kerr inside a group, 4 isolated exact Kerr
-            int cbdN;
         };
 
         ChainResult InitChain(float3 dir)
@@ -338,7 +341,6 @@ Shader "Custom/BlackHoleLensingPassthrough"
             cr.captured = false; cr.anyStrong = false; cr.traces = 0; cr.firstHole = -1;
             cr.hasFirst = false; cr.firstCross = 0; cr.firstIdx = 0; cr.why = BH_WHY_NONE;
             cr.path = 0;
-            cr.cbdN = 0;
             return cr;
         }
 
@@ -410,91 +412,6 @@ Shader "Custom/BlackHoleLensingPassthrough"
             return ApplyKick(dir, kick);
         }
 
-        // ==================================================================
-        // Circumbinary disk (one, around the closest close pair; C# fades it in)
-        // ==================================================================
-        #define BH_CBD_ID 8
-
-        // lapse of the superposed static field at x: redshift of a resting emitter
-        float StaticLapse(float3 x, int count)
-        {
-            float S = 0.0;
-            [loop]
-            for (int i = 0; i < count; i++)
-            {
-                float3 dx = x - _BHPositionsCamRelative[i].xyz;
-                S += _BHSpinJ[i].w * rsqrt(max(dot(dx, dx), 1e-30));
-            }
-            return max(1.0 - 0.5 * S, 1e-3) / (1.0 + 0.5 * S);
-        }
-        // (rW, phi, nR, nPhi) of a ray crossing the shared disk's plane at x, trace direction d
-        float4 CBDCrossingState(float3 x, float3 d, int count)
-        {
-            float3 nrm = _BHCBD1.xyz;
-            float3 rel = x - _BHCBD0.xyz;
-            float3 relP = rel - dot(rel, nrm) * nrm;
-            float r = max(length(relP), 1e-6);
-            float3 bx, by, bz;
-            BuildSpinBasis(nrm, bx, by, bz);
-            float phi = atan2(dot(relP, by), dot(relP, bx));
-            float sp, cp;
-            sincos(phi, sp, cp);
-            float3 eR = cp * bx + sp * by;      // increasing r
-            float3 ePhi = -sp * bx + cp * by;   // increasing phi (same convention as the trace)
-            return float4(r, phi, dot(d, eR), dot(d, ePhi));
-        }
-
-        void CBDCross(float3 x, float3 d, int count, inout ChainResult cr, inout bool anyEm)
-        {
-            float4 s = CBDCrossingState(x, d, count);
-            int idx = cr.cbdN;
-            cr.cbdN++;
-            float op;
-            // reduced res: the first visible emission is re-shaded at full res -> opacity only
-            g_bhOpacityOnly = g_bhLowRes && !anyEm;
-            float3 em = ShadeCBDAt(s.x, s.y, s.z, s.w, idx, 0.0, _BHCBD2.w, _BHNoise, sampler_BHNoise, op);
-            g_bhOpacityOnly = false;
-            if (op <= 0.0)
-                return;
-            if (!anyEm)
-            {
-                cr.hasFirst = true;
-                cr.firstHole = BH_CBD_ID;
-                cr.firstCross = s;
-                cr.firstIdx = (float)idx;
-                cr.emFirst = em;
-                anyEm = true;
-            }
-            cr.emAll += em * cr.T;
-            cr.T *= 1.0 - op;
-        }
-
-        float3 CBDLineEmission(float3 d, int count, out float T)
-        {
-            T = 1.0;
-            if (_BHCBD2.w <= 0.0) return float3(0, 0, 0);
-            float dn = dot(d, _BHCBD1.xyz);
-            if (abs(dn) < 1e-8) return float3(0, 0, 0);
-            float t = dot(_BHCBD0.xyz, _BHCBD1.xyz) / dn;
-            if (t <= 0.0) return float3(0, 0, 0);
-            float4 s = CBDCrossingState(d * t, d, count);
-            float op;
-            float3 em = ShadeCBDAt(s.x, s.y, s.z, s.w, 0, 0.0, _BHCBD2.w, _BHNoise, sampler_BHNoise, op);
-            T = 1.0 - op;
-            return em;
-        }
-
-        // shared disk on a straight piece p + t d, t in (0, tMax]
-        void CBDRay(float3 p, float3 d, float tMax, int count, inout ChainResult cr, inout bool anyEm)
-        {
-            if (_BHCBD2.w <= 0.0) return;
-            float dn = dot(d, _BHCBD1.xyz);
-            if (abs(dn) < 1e-8) return;
-            float t = -dot(p - _BHCBD0.xyz, _BHCBD1.xyz) / dn;
-            if (t <= 0.0 || t > tMax) return;
-            CBDCross(p + d * t, d, count, cr, anyEm);
-        }
-
     #if defined(BH_SINGLE)
         // Exactly one hole: exact trace to infinity, nothing else.
         void TraceChain(float3 dir, int count, int camHole, out ChainResult cr)
@@ -560,10 +477,10 @@ Shader "Custom/BlackHoleLensingPassthrough"
         // Tested (single hole, 40 Rs region): 0.26 px error where the image is not
         // strongly lensed, 0.05 px between neighbouring rays (no banding), 7 steps per
         // ray (was 12). Merger-mode rays skimming a photon sphere: ~1 px on screen.
-        #define BH_MED_STEP_NEAR   0.96
-        #define BH_MED_STEP_FAR    1.5
-        #define BH_MED_STEP_GROW   0.96
-        #define BH_MED_MAX_STEPS   128
+        #define BH_MED_STEP_NEAR   0.12
+        #define BH_MED_STEP_FAR    0.48
+        #define BH_MED_STEP_GROW   0.12
+        #define BH_MED_MAX_STEPS   360
         #define BH_GRAVITOMAGNETIC 1
         #define BH_QUADRUPOLE 1
 
@@ -653,15 +570,13 @@ Shader "Custom/BlackHoleLensingPassthrough"
         float3 StaticToZamo(float3 n, float3 v) { return normalize(n - v + dot(n, v) * n); }
         float3 ZamoToStatic(float3 n, float3 v) { return normalize(n + v - dot(n, v) * n); }
 
-        // RK4 through the medium (shades the shared disk on the way). Returns
+        // RK4 through the medium. Returns
         // 0: left every group sphere, 1: reached the exact sphere of hitHole,
-        // 2: inside a photon sphere and falling in (merger mode), 3: step budget used up,
-        // 4: became opaque (shared disk).
+        // 2: inside a photon sphere and falling in (merger mode), 3: step budget used up.
         int IntegrateMedium(inout float3 p, inout float3 d, int count, uint mask, out int hitHole,
                             inout ChainResult cr, inout bool anyEm)
         {
             hitHole = -1;
-            bool cbdOn = (_BHCBD2.w > 0.0);
             [loop]
             for (int s = 0; s < BH_MED_MAX_STEPS; s++)
             {
@@ -729,20 +644,6 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         hitHole = k2;
                         hitInner = true;
                         break;
-                    }
-                }
-
-                // shared disk crossed on this (possibly shortened) step
-                if (cbdOn)
-                {
-                    float sa = dot(p0 - _BHCBD0.xyz, _BHCBD1.xyz);
-                    float sb = dot(p - _BHCBD0.xyz, _BHCBD1.xyz);
-                    if (sa * sb < 0.0)
-                    {
-                        float t = sa / (sa - sb);
-                        CBDCross(lerp(p0, p, t), normalize(lerp(d0, d, t)), count, cr, anyEm);
-                        if (cr.T < 0.01)
-                            return 4;
                     }
                 }
                 if (hitInner)
@@ -835,9 +736,6 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     float tEnd = 3.0e38;
                     if (target >= 0)
                         tEnd = tMember ? tKey : max(dot(_BHPositionsCamRelative[target].xyz - p, d), 0.0);
-
-                    CBDRay(p, d, tEnd, count, cr, anyEm);
-                    if (cr.T < 0.01) { stopped = true; break; }
 
                     bool touchMed = tMember || fromMedium;
                     float3 kick = float3(0, 0, 0);
@@ -992,7 +890,8 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         cr.firstIdx = fi;
                         cr.emFirst = ef;
                     }
-                    anyEm = anyEm || hf;
+                    // a volumetric disk reports no first crossing: any absorbing trace counts
+                    anyEm = anyEm || hf || (trans < 0.999);
                     kerrCount++;
                     cr.traces++;
                     cr.emAll += color * cr.T;
@@ -1051,13 +950,9 @@ Shader "Custom/BlackHoleLensingPassthrough"
                  + 512.0 * (float) (cr.firstHole + 1);
         }
 
-        // first visible emission, re-shaded at this pixel (a hole disk or the shared disk)
+        // first visible emission, re-shaded at this pixel
         float3 ShadeFirstCrossing(int h, float4 fc, float idx, float lod, out float opacity)
         {
-            [branch]
-            if (h == BH_CBD_ID)
-                return ShadeCBDAt(fc.x, fc.y, fc.z, fc.w, (int) idx, lod, _BHCBD2.w, _BHNoise, sampler_BHNoise, opacity);
-
             HoleDisk hd = LoadHoleDisk(h);
             float aPhys = clamp(_BHSpins[h].x, -0.998, 0.998) * KERR_M;
             float diskOut = max(_BHParams[h].z, hd.rIsco * 1.05);
@@ -1165,8 +1060,6 @@ Shader "Custom/BlackHoleLensingPassthrough"
                                    0.5 * ((d01.x - d00.x) + (d11.x - d10.x)));
                 float2 gP = float2(0.5 * ((d10.y - d00.y) + (d11.y - d01.y)),
                                    0.5 * ((d01.y - d00.y) + (d11.y - d10.y)));
-                if (firstHole == BH_CBD_ID)
-                    gR *= lerp(6.0 / max(_BHCBD0.w, 1e-6), 1.0 / max(_BHCBD7.x, 1e-6), _BHCBD7.w);
                 float su = (4.0 / TWO_PI) * _BHNoiseSize.x / _BHDownsample;
                 float sv = 0.2 * _BHNoiseSize.y / _BHDownsample;
                 float2 tx = float2(gP.x * su, gR.x * sv);
@@ -1174,7 +1067,10 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 float lod = max(0.5 * log2(max(max(dot(tx, tx), dot(ty, ty)), 1e-12)), 0.0);
 
                 float op;
+            #if !defined(BH_VOLUMETRIC_DISK)
+                // (volumes are not a point: they report no first crossing, all their emission is in a.rgb)
                 emFirst = ShadeFirstCrossing(firstHole, fc, firstIdx, lod, op);
+            #endif
             }
 
             float4 a = lerp(lerp(a00, a10, f.x), lerp(a01, a11, f.x), f.y);
@@ -1205,6 +1101,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
             HLSLPROGRAM
             #pragma vertex Vert
             #pragma fragment FragComposite
+            #pragma multi_compile_fragment _ BH_VOLUMETRIC_DISK
 
             float4 FragComposite (Varyings input) : SV_Target
             {
@@ -1252,20 +1149,6 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 }
                 float tFirst = FirstDomainEntry(dir, count, camHole);
 
-                if (isSkyPixel && !visibleBend)
-                {
-                #if BH_DEBUG_COST
-                    return float4(0, 0, 0, 1);
-                #endif
-                    float Tc;
-                    float3 ec = CBDLineEmission(dir, count, Tc);
-                    float3 outC = ObserverShift(ec + sceneColor * Tc);
-                #if BH_DEBUG_PATH
-                    outC = DebugPathTint(0, outC);
-                #endif
-                    return float4(outC, 1);
-                }
-
                 if (!isSkyPixel && sceneEye / max(dot(dir, camFwd0), 1e-4) < tFirst)
                 {
                 #if BH_DEBUG_COST
@@ -1274,17 +1157,18 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     return float4(sceneColor, 1);
                 }
 
-                if (tFirst > 1e30)
+                // sky with no visible bending (the scene as it is), or weak field only
+                bool skyOnly = isSkyPixel && !visibleBend;
+                if (skyOnly || tFirst > 1e30)
                 {
                 #if BH_DEBUG_COST
-                    return float4(0, 0, 0.6, 1);
+                    return skyOnly ? float4(0, 0, 0, 1) : float4(0, 0, 0.6, 1);
                 #endif
-                    float Tc;
-                    float3 ec = CBDLineEmission(dir, count, Tc);
-                    float3 d = WeakOnlyDir(dir, count);
-                    float pixAngleW = 2.0 / (UNITY_MATRIX_P[1][1] * _ScreenParams.y);
-                    float3 sky = SampleSky(d, pixAngleW);
-                    float3 outC = ObserverShift(ec + sky * Tc);
+                    float3 bg = sceneColor;
+                    [branch]
+                    if (!skyOnly)
+                        bg = SampleSky(WeakOnlyDir(dir, count), pixAngle);
+                    float3 outC = ObserverShift(bg);
                 #if BH_DEBUG_PATH
                     outC = DebugPathTint(0, outC);
                 #endif
@@ -1329,6 +1213,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
             #pragma vertex Vert
             #pragma fragment FragLow
             #pragma multi_compile_fragment _ BH_SINGLE
+            #pragma multi_compile_fragment _ BH_VOLUMETRIC_DISK
 
             struct LowOut
             {
@@ -1348,7 +1233,8 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 float3 dir = PixelRayDir(input.texcoord);
                 int count = min(_BHCount, 8);
                 int camHole = CameraHole(count);
-                if (FirstDomainEntry(dir, count, camHole) > 1e30)
+                bool weakOnly = FirstDomainEntry(dir, count, camHole) > 1e30;
+                if (weakOnly)
                 {
                 #if defined(BH_SINGLE)
                     // Outside the region: write the weak-field direction with the class of an escaping
@@ -1361,6 +1247,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 }
 
                 g_bhLowRes = true;
+                g_bhDiskLod = log2(max(_BHDownsample, 1.0));
                 ChainResult cr;
                 TraceChain(dir, count, camHole, cr);
                 o.t0 = float4(cr.emAll - cr.emFirst, cr.T);
@@ -1387,6 +1274,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
             #pragma vertex Vert
             #pragma fragment FragTrace
             #pragma multi_compile_fragment _ BH_SINGLE
+            #pragma multi_compile_fragment _ BH_VOLUMETRIC_DISK
 
             float4 FragTrace (Varyings input) : SV_Target
             {

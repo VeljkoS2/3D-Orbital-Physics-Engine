@@ -221,9 +221,9 @@ MonoBehaviour:
   maxSubsteps: 1000
   gravitationalWaves: 1
   gwStrength: 1
-  keepAccuracy: 1
+  keepAccuracy: 0
   blackHoleMergers: 1
-  mergerRecoil: 0
+  mergerRecoil: 1
 --- !u!114 &65476194
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -280,13 +280,21 @@ MonoBehaviour:
   innerKerrRadiusFastRs: 12
   groupRadiusRs: 40
   debugForceMedium: 0
-  cbdCavity: 2
-  cbdOuterScale: 1
-  cbdBrightness: 1
-  cbdSpeed: 1
-  mergerRingdownM: 10
+  mergerRingdownM: 30
   mergerTimeStretch: 1
-  cbdLookCurve: 1
+  diskRefillOrbits: 1
+  volumetricDisk: 1
+  volumetricThicknessScale: 1
+  volumetricGasThickness: 0.003
+  volumetricOpticalDepth: 10
+  volumetricSteps: 6
+  volumetricMaxSteps: 24
+  diskNoise3D: {fileID: 4900000, guid: a5c4020cbe121664faeed5d13260eeac, type: 3}
+  volumetricClumpiness: 0.223
+  volumetricNoiseHeightScale: 0.503
+  atmosphereOpticalDepth: 10
+  atmosphereScaleHeight: 0.773
+  atmosphereBrightness: 0.5
   skybox: {fileID: 8900000, guid: 2505f0c83c6f06640b7a5c9f0224fe00, type: 3}
   noiseTexture: {fileID: 2800000, guid: dabcef50645c24543b5fe4c2ac1fb3f4, type: 3}
   kerrSnCnLUT: {fileID: 2800000, guid: d754fecc6cc829a44bb91eacc0e788a5, type: 2}
@@ -620,7 +628,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &245238771
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -633,19 +641,19 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b23267dc67cf0c24e91cd9089e161989, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Properties
-  mass: 6.1e+33
+  mass: 6.1576e+33
   hasAtmosphere: 0
   hasRings: 0
   worldPosition:
     x: 0
     y: 0
-    z: 142857142.857143
+    z: 300000000
   acceleration:
     x: 0
     y: 0
     z: 0
   velocity:
-    x: 80000000
+    x: 60000000
     y: 0
     z: 0
   rotationalPeriod: 0
@@ -1732,7 +1740,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!222 &617533406
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2236,7 +2244,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b23267dc67cf0c24e91cd9089e161989, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Properties
-  mass: 7.16e+33
+  mass: 1.9e+42
   hasAtmosphere: 0
   hasRings: 0
   worldPosition:
@@ -5244,19 +5252,19 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b23267dc67cf0c24e91cd9089e161989, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Properties
-  mass: 1.9e+42
+  mass: 2e+34
   hasAtmosphere: 0
   hasRings: 0
   worldPosition:
     x: 0
-    y: -1e+17
+    y: 500000000
     z: 0
   acceleration:
     x: 0
     y: 0
     z: 0
   velocity:
-    x: 0
+    x: 30000000
     y: 0
     z: 0
   rotationalPeriod: 0

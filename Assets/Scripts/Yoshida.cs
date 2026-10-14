@@ -5,6 +5,10 @@ using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
 
+// Same physics as before (Yoshida-4, 2.5PN radiation reaction for black-hole pairs, merger
+// check after every substep), but all substeps of a frame run in one Burst job on flat
+// arrays instead of ~40 GetComponent calls and managed double3 math per substep. The job
+// returns early only when two black holes touch, so BlackHoleMerger.TryMerge runs as before.
 public class Yoshida : MonoBehaviour
 {
     List<GameObject> bodies;
@@ -334,6 +338,8 @@ struct YoshidaSubstepJob : IJob
                 double r = math.length(xr);
                 if (r <= 0) continue;
                 double3 nn = xr / r;
+                // same softening as the accelerations: below the touching distance the
+                // 2.5PN term (~1/r^4) would give unphysical kicks
                 r = math.max(r, rad[i] + rad[j]);
                 double rdot = math.dot(nn, vr);
                 double v2 = math.lengthsq(vr);
@@ -361,3 +367,4 @@ struct YoshidaSubstepJob : IJob
         return false;
     }
 }
+

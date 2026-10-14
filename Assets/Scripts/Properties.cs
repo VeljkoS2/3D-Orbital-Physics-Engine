@@ -63,7 +63,7 @@ public class Properties : MonoBehaviour
 
     public void CalculateRadius()
     {
-        if (mass > 6e32)
+        if (mass > 1e31)
         {
             CalculateBlackHoleParamaters(this);
             AssignBlackHoleAppearanceProperties(this);
