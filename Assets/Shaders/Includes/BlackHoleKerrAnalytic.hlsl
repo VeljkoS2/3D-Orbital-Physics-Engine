@@ -508,7 +508,12 @@ ThetaMotion SolveThetaMotion(float a, float xi, float eta,
         tm.kTheta = sqrt(max(denom / uPlus, 1e-10f));
         tm.K_theta = max(LutK(tm.ep), 1e-5f);
 
-        if (uPlusRaw > 1e-6f)
+        // cos(psi) = cos(theta) / sqrt(u+) is exact near the equator; sin(psi) from Theta (no cancellation) near
+        // the turning point. Each taken where it is the smaller one, the other from it: sqrt(1 - sin^2) right at
+        // the equator is sqrt of a float rounding (0 or 2.4e-4 instead of ~0) -- a camera in a hole's disk plane
+        // (orbits in its plane: common) got ~2e-4 rad of noise in every exit direction, i.e. sparkle / flicker.
+        float cosD = clamp(cosThetaStart * rsqrt(uPlus), -1.0f, 1.0f);
+        if (uPlusRaw > 1e-6f && cosD * cosD > 0.5f)
         {
             float u = cosThetaStart * cosThetaStart;
             float Sigma = r * r + a2 * u;
@@ -520,7 +525,7 @@ ThetaMotion SolveThetaMotion(float a, float xi, float eta,
         }
         else
         {
-            cosPsi = clamp(cosThetaStart / sqrt(uPlus), -1.0f, 1.0f);
+            cosPsi = cosD;
             sinPsi = sqrt(max(1.0f - cosPsi * cosPsi, 0.0f));
         }
 
@@ -1143,7 +1148,7 @@ float PolarPhiToEquator(PolarPhiCum pc, int k)
 // End of an escaping ray: cos(theta) and the total polar azimuth from ONE fetch
 // (EvaluateCosTheta and Q(t) need sn/cn at the same folded phase).
 void EvaluateThetaEnd(ThetaMotion tm, PolarPhiCum pc, float xi, float a, float lambda,
-                      out float cosThetaEnd, out float polarDPhi, out float thetaDirSign)
+                      out float cosThetaEnd, out float polarDPhi, out float thetaDirSign, out float thetaSn2)
 {
     float u = tm.s0 + lambda * tm.kTheta / (4.0 * max(tm.K_theta, 1e-5));
     float k = floor(2.0 * u);
@@ -1160,6 +1165,10 @@ void EvaluateThetaEnd(ThetaMotion tm, PolarPhiCum pc, float xi, float a, float l
         float chi = atan2(sncn.x, pc.c * sncn.y);
         polarDPhi = k * pc.P + PolarPhiJChi(pc, a, chi, t) - pc.I0;
         thetaDirSign = (u01 < 0.5) ? 1.0 : -1.0; // cos(theta) falls for u01 < 1/2
+        // 1 - mu^2 / u+ without the cancellation, from the same cn as mu (not the table's sn: its own
+        // interpolation error would put the velocity off the position)
+        float cnA = saturate(abs(sncn.y));
+        thetaSn2 = (1.0 - cnA) * (1.0 + cnA);
 
     }
     else
@@ -1169,6 +1178,7 @@ void EvaluateThetaEnd(ThetaMotion tm, PolarPhiCum pc, float xi, float a, float l
         polarDPhi = k * pc.P + PolarPhiJVortical(tm, pc, xi, a, t) - pc.I0;
         float phaseSign = (u01 < 0.25 || (u01 >= 0.5 && u01 < 0.75)) ? 1.0 : -1.0;
         thetaDirSign = -tm.hemiSign * phaseSign;
+        thetaSn2 = -1.0;
     }
 }
 
@@ -1754,6 +1764,246 @@ float3 BlackHoleWeakFieldDirection(float3 rayDirWorld, float3 bhPositionCamRelat
 // Core trace (28 arguments, signature unchanged). holeIndex must be a valid
 // hole (0..7): the per-hole disk constants are read from it.
 // ------------------------------------------------------------------
+// ==================================================================
+// Relativistic jets (shared with BlackHoleLensingPassthrough.shader, which draws them on straight pieces of
+// a ray). Inside a hole's exact trace they are sampled along the geodesic itself: r(lambda), cos theta(lambda)
+// are closed form, so a jet near the hole is lensed exactly. Only the Mino-time windows where the ray
+// comes near the spin axis (around its theta turning points) are sampled.
+// Shape (M87-like): width ~ tan(opening) sqrt(z (z + z_c)) (parabolic, then conical); a narrow white-hot
+// spine in a blue limb-brightened sheath; light per length ~ z^-0.9 (brightest where it is launched) with a
+// soft base / end; knots (shocks) riding out along the spine. Doppler beamed per lobe: (delta / delta_side)^2.7.
+// ==================================================================
+float4 _BHJet[8];      // x strength (0 = none)
+float4 _BHJetParams;   // x tan(half opening angle), y Lorentz factor, z length (Rs), w base height (Rs)
+float4 _BHJetColor;    // rgb (linear)
+#define JET_ZC      40.0   // parabolic -> conical (Rs)
+#define JET_SPINE   0.15   // spine width / beam width
+#define JET_HOLLOW  0.6    // sheath: inner Gaussian / outer
+#define JET_SPINE_W 0.65   // share of the light in the spine
+#define JET_GAIN    6.0    // overall (the spine's base into HDR at Eddington ~0.1, the rest below)
+#define JET_RGEO    60.0   // a separate hole: sampled along the geodesic inside this radius (Rs, at most its region)
+
+float JetWidthRs(float zRs)
+{
+    return _BHJetParams.x * sqrt(zRs * (zRs + JET_ZC)) + 0.3;
+}
+float JetHash(float n) { return frac(sin(n * 127.1) * 43758.5453); }
+// knots: shocks riding out along the beam (self-similar: spaced in log z), two octaves of value noise
+float JetKnots(float lz, float sgn)
+{
+    float u = 2.0 * lz - 0.5 * _Time.y + ((sgn > 0.0) ? 0.0 : 57.0);
+    float i = floor(u);
+    float f = u - i;
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float v = lerp(JetHash(i), JetHash(i + 1.0), f);
+    float u2 = 2.7 * u + 0.37;
+    float i2 = floor(u2);
+    float f2 = u2 - i2;
+    f2 = f2 * f2 * (3.0 - 2.0 * f2);
+    v = 0.7 * v + 0.3 * lerp(JetHash(i2 + 17.0), JetHash(i2 + 18.0), f2);
+    return 0.25 + 1.75 * v * v;
+}
+// light per length along the beam at height z (any units, with zMin / zMax in the same): (spine, sheath).
+// knotAmt: 1 = the knots, 0 = their mean (looking along the beam they blur into it)
+float2 JetLine1(float z, float zMin, float zMax, float sgn, float knotAmt)
+{
+    float zr = max(z / zMin, 1.0);
+    float shape = smoothstep(zMin, 2.5 * zMin, z) * (1.0 - smoothstep(0.5 * zMax, zMax, z));
+    float kn = 0.75;
+    [branch]
+    if (knotAmt > 0.0)
+        kn = lerp(0.75, JetKnots(log2(zr), sgn), knotAmt);
+    float L = JET_GAIN * pow(zr, -0.9) * shape;
+    return L * float2(JET_SPINE_W * kn, (1.0 - JET_SPINE_W) * (0.75 + 0.25 * kn));
+}
+// the pixel's footprint at the traced hole (Rs; set by the caller): the beam is blurred to it, so a thin
+// spine stays a smooth line instead of crawling between pixels (the light is kept: Gaussians just widen)
+static float g_jetFootRs = 0.0;
+// the cross-sections (unit area each) at distance^2 rho2 from the axis, beam width sg, blurred by a
+// footprint of variance f2: (spine, sheath)
+float2 JetProfile(float rho2, float sg, float f2)
+{
+    float sg2 = sg * sg;
+    float s22 = JET_HOLLOW * JET_HOLLOW * sg2;
+    float ss2 = JET_SPINE * JET_SPINE * sg2 + f2;
+    float ge = sg2 + f2, he = s22 + f2;
+    float spine = exp(-0.5 * rho2 / ss2) / ss2;
+    float sheath = (sg2 * exp(-0.5 * rho2 / ge) / ge - s22 * exp(-0.5 * rho2 / he) / he) / (sg2 - s22);
+    return 0.159155 * float2(spine, sheath);
+}
+// their integrals along a straight line passing at distance^2 b2 (per unit length across)
+float2 JetProfileProj(float b2, float sg, float f2)
+{
+    float sg2 = sg * sg;
+    float s22 = JET_HOLLOW * JET_HOLLOW * sg2;
+    float ss2 = JET_SPINE * JET_SPINE * sg2 + f2;
+    float ge = sg2 + f2, he = s22 + f2;
+    float spine = exp(-0.5 * b2 / ss2) * rsqrt(ss2);
+    float sheath = (sg2 * exp(-0.5 * b2 / ge) * rsqrt(ge) - s22 * exp(-0.5 * b2 / he) * rsqrt(he)) / (sg2 - s22);
+    return 0.398942 * float2(spine, sheath);
+}
+// (spine, sheath) light -> colour: the spine white-hot, the sheath the jet colour
+float3 JetRGB(float2 v)
+{
+    float3 col = _BHJetColor.rgb;
+    float3 core = col + (max(col.x, max(col.y, col.z)) - col) * 0.75;
+    return v.x * core + v.y * col;
+}
+// Doppler beaming of a lobe, cosLobe = traced direction . lobe direction (the light goes the other way)
+float JetBoost(float cosLobe)
+{
+    float G = max(_BHJetParams.y, 1.0001);
+    float beta = sqrt(1.0 - 1.0 / (G * G));
+    return pow(1.0 / max(1.0 + beta * cosLobe, 1e-4), 2.7);
+}
+
+// The traced direction at Mino time lam (r, mu given) in the flat embedding (z = r mu,
+// rho = sqrt(r^2 + a^2) sin theta, azimuth from dphi / dlambda): (d rho, rho d phi, dz) per dlambda.
+float3 JetGeoVel(ThetaMotion tm, RadialMotion rad, float lam, float sProg, float uPL, float xi, float eta, float a,
+                 float r, float mu)
+{
+    float D = KerrDelta(r, a);
+    float X = r * r + a * a - a * xi;
+    float Rr = max(X * X - D * (eta + (xi - a) * (xi - a)), 0.0);
+    bool afterTurn = rad.hasTurning && (sProg > abs(rad.sTurn - rad.sStart));
+    bool rUp = rad.innerRegion ? (rad.hasTurning && !afterTurn)
+                               : (rad.hasTurning ? afterTurn : !rad.isInward);
+    float dr = (rUp ? 1.0 : -1.0) * sqrt(Rr);
+    float u01 = frac(tm.s0 + lam * uPL);
+    float s2 = max(1.0 - mu * mu, 1e-6);
+    float Mmu = max(eta - (xi * xi + eta - a * a) * mu * mu - a * a * mu * mu * mu * mu, 0.0);
+    float dmu = ((u01 < 0.5) ? -1.0 : 1.0) * sqrt(Mmu);
+    float sinT = sqrt(s2);
+    float rq = sqrt(r * r + a * a);
+    return float3(sinT * (r / rq) * dr - rq * mu / sinT * dmu,
+                  rq * sinT * (a * X / max(D, 1e-4) + xi / s2 - a),
+                  mu * dr + r * dmu);
+}
+
+// The jets of hole h along the exact geodesic, where r < rGeo (Rs), faded out over rGeo / 2 .. rGeo where the
+// straight pieces outside fade in (no seam where the two meet). front: before the first equator
+// crossing (in front of the disk), back: after it (the caller dims it by the disk's transmittance).
+// Each pass near the axis (a theta turning point): crossing the beam, the tangent line there integrated
+// across it in closed form (like a straight piece: the thin spine needs no samples); running along it,
+// 16 samples of the geodesic itself (blended by the angle to the axis, as the straight pieces do).
+void AccumulateJetGeodesic(ThetaMotion tm, RadialMotion rad, float lambdaTotal, float xi, float eta, float a,
+                           int h, float rGeo, float rHorizon, out float3 front, out float3 back)
+{
+    front = float3(0, 0, 0);
+    back = float3(0, 0, 0);
+    float2 fr2 = float2(0, 0), bk2 = float2(0, 0);
+    if (rad.numRealRoots == 1)
+        return; // (aimed at the centre: no r(lambda) map; they fall in)
+    float zMin = _BHJetParams.w, zMax = _BHJetParams.z;
+    // the jets' widest angle (at the base), out to where they are dark (6 widths, as the straight pieces'
+    // window, and the pixel's blur): a narrower cut left a hard edge where its light was still visible
+    float muWin = cos(atan(6.0 * (JetWidthRs(zMin) + g_jetFootRs) / zMin));
+    float maxCos = sqrt(saturate(tm.uPlus));
+    if (maxCos < muWin)
+        return; // never near the axis: most rays
+    float Cl = max(rad.lambdaScale * rad.K_r * rad.radialNorm, 1e-8); // dlambda / ds
+    float uPL = tm.kTheta / (4.0 * max(tm.K_theta, 1e-5));
+    float lamX = tm.isVortical ? 3.0e38 : (0.25 + 0.5 * ceil((tm.s0 - 0.25) / 0.5) - tm.s0) / uPL;
+    // (a crossing at the camera itself -- camera in the disk's plane -- hides nothing; one clear of it does,
+    // weighted in as the disk's image order is: no flip on a float rounding)
+    float lamX2 = lamX + 0.5 / uPL;
+    float wX = tm.isVortical ? 1.0 : saturate(lamX * uPL / max(ThetaPhaseHalfWidth(tm, KERR_ORDER_MU_EPS), 1e-6));
+    float cT = muWin / maxCos;
+    float hwU = tm.isVortical ? 1e9 : ForwardPhaseCS(tm.ep, cT, sqrt(saturate(1.0 - cT * cT)));
+    float k0 = ceil((tm.s0 - hwU) / 0.5);
+    float rEmit = rHorizon * 1.05;
+
+    [loop]
+    for (int w = 0; w < 4; w++)
+    {
+        float la = 0.0, lb = lambdaTotal;
+        float wAlong = 1.0;
+        float knotA = 0.0;
+        if (!tm.isVortical)
+        {
+            float lamT = (0.5 * (k0 + (float) w) - tm.s0) / uPL; // a theta turning point
+            float hl = hwU / uPL;
+            if (lamT - hl >= lambdaTotal)
+                break;
+            la = max(lamT - hl, 0.0);
+            lb = min(lamT + hl, lambdaTotal);
+            // the closed-form crossing needs it inside the trace: weighted in as it gets there (no switch)
+            float inside = smoothstep(0.0, hl, lamT) * smoothstep(0.0, hl, lambdaTotal - lamT);
+            [branch]
+            if (inside > 0.0)
+            {
+                // across: the tangent line at the turning point, closest approach to the axis in closed form
+                float sT = lamT / Cl;
+                float rT = EvaluateR(rad, ProgressiveToNativePhase(rad, sT));
+                float muT = EvaluateCosTheta(tm, lamT);
+                float3 v = JetGeoVel(tm, rad, lamT, sT, uPL, xi, eta, a, rT, muT);
+                float iv = rsqrt(max(dot(v, v), 1e-20));
+                float sgn = (muT >= 0.0) ? 1.0 : -1.0;
+                float dz = sgn * v.z * iv;
+                float A = max(1.0 - dz * dz, 1e-6);
+                float sinP = sqrt(A);
+                float wA = 1.0 - smoothstep(0.15, 0.35, sinP);
+                wAlong = 1.0 - (1.0 - wA) * inside;   // (the samples' share)
+                knotA = 1.0 - wA;
+                float rhoT = sqrt((rT * rT + a * a) * max(1.0 - muT * muT, 0.0));
+                float B = rhoT * v.x * iv;
+                float tS = -B / A;
+                float b2 = max(rhoT * rhoT - B * B / A, 0.0);
+                float zC = sgn * rT * muT + tS * dz;
+                float rC = sqrt(b2 + zC * zC);
+                [branch]
+                if (wAlong < 1.0 && rC < rGeo && rC > rEmit && zC > 0.5 * zMin)
+                {
+                    float2 c = JetLine1(zC, zMin, zMax, sgn, knotA) * JetProfileProj(b2, JetWidthRs(zC), g_jetFootRs * g_jetFootRs)
+                             * ((1.0 - wAlong) / sinP * JetBoost(dz) * (1.0 - smoothstep(0.5 * rGeo, rGeo, rC)));
+                    float fs = (lamT < lamX) ? 1.0 : ((lamT < lamX2) ? 1.0 - wX : 0.0);
+                    fr2 += c * fs;
+                    bk2 += c * (1.0 - fs);
+                }
+            }
+        }
+        else if (w > 0)
+            break;
+        if (lb <= la || wAlong <= 0.0)
+            continue;
+        // along: samples of the geodesic
+        float dl = (lb - la) * (1.0 / 16.0);
+        [loop]
+        for (int i = 0; i < 16; i++)
+        {
+            float lam = la + ((float) i + 0.5) * dl;
+            float sProg = lam / Cl;
+            float r = EvaluateR(rad, ProgressiveToNativePhase(rad, sProg));
+            if (r > rGeo || r < rEmit)
+                continue;
+            float mu = EvaluateCosTheta(tm, lam);
+            float sgn = (mu >= 0.0) ? 1.0 : -1.0;
+            float z = r * abs(mu);
+            if (z < 0.5 * zMin || z > zMax)
+                continue;
+            float rho2 = (r * r + a * a) * max(1.0 - mu * mu, 1e-6);
+            float3 v = JetGeoVel(tm, rad, lam, sProg, uPL, xi, eta, a, r, mu);
+            float iv = rsqrt(max(dot(v, v), 1e-20));
+            float nz = v.z * iv;
+            // the beam blurred across by the step between samples (the ray moves that much sideways
+            // through it): a thin spine between two samples is then not lost, and does not flicker
+            float dPath = (r * r + a * a * mu * mu) * dl;   // dl_path = Sigma dlambda
+            float sideStep = 0.5 * dPath * sqrt(saturate(1.0 - nz * nz));
+            float2 j = JetLine1(z, zMin, zMax, sgn, knotA)
+                     * JetProfile(rho2, JetWidthRs(z), g_jetFootRs * g_jetFootRs + sideStep * sideStep);
+            [branch]
+            if (j.x + j.y < 1e-7)
+                continue;
+            float2 c = j * (wAlong * JetBoost(nz * sgn) * dPath * (1.0 - smoothstep(0.5 * rGeo, rGeo, r)));
+            float fs = (lam < lamX) ? 1.0 : ((lam < lamX2) ? 1.0 - wX : 0.0);
+            fr2 += c * fs;
+            bk2 += c * (1.0 - fs);
+        }
+    }
+    front = JetRGB(fr2) * _BHJet[h].x;
+    back = JetRGB(bk2) * _BHJet[h].x;
+}
+
 void KerrTraceCore(
     float3 rayDirWorld, float3 bhPositionCamRelative, float schwarzschildRadius,
     float diskInnerRadius, float diskOuterRadius, float escapeRadiusParam, float3 diskNormal,
@@ -1764,7 +2014,8 @@ void KerrTraceCore(
     out float3 color, out float3 exitPos, out float3 exitDir,
     float4 diskAppearanceParamaters1, float4 diskAppearanceParamaters2,
     out bool didEscape, out float outTransmittance,
-    out bool hasFirst, out float4 firstCross, out float firstIdx, out float3 emFirst, int holeIndex)
+    out bool hasFirst, out float4 firstCross, out float firstIdx, out float3 emFirst, int holeIndex,
+    float jetRGeo)
 {
     hasFirst = false;
     firstCross = float4(0, 0, 0, 0);
@@ -1835,6 +2086,20 @@ void KerrTraceCore(
     dc.ap2 = diskAppearanceParamaters2;
 
     CrossingAcc acc = MakeCrossingAcc();
+    acc.crossingCount = (int) (g_orderBase + 0.5);
+    // the order the next equator crossing after this trace would have (a continued trace starts there)
+    g_orderOut = g_orderBase;
+    [branch]
+    if (!thetaMotion.isVortical)
+    {
+        float uPLo = thetaMotion.kTheta / (4.0 * max(thetaMotion.K_theta, 1e-5));
+        int kF = (int) ceil((thetaMotion.s0 - 0.25) / 0.5);
+        int kL = (int) floor((thetaMotion.s0 + lambdaPhysicalTotal * uPLo - 0.25) / 0.5);
+        float wF = saturate((0.25 + 0.5 * (float) kF - thetaMotion.s0)
+                            / max(ThetaPhaseHalfWidth(thetaMotion, KERR_ORDER_MU_EPS), 1e-6));
+        if (kL >= kF)
+            g_orderOut += (float) (kL - kF) + wF;
+    }
 
     PolarPhiCum polarCum = (PolarPhiCum) 0;
     bool polarReady = false;
@@ -1855,6 +2120,14 @@ void KerrTraceCore(
     firstCross = acc.firstCross;
     firstIdx = acc.firstIdx;
     emFirst = acc.emFirst;
+
+    // jets along the geodesic (jetRGeo > 0): in front of the disk, or behind it
+    float3 jetF = float3(0, 0, 0), jetB = float3(0, 0, 0);
+    [branch]
+    if (jetRGeo > 0.0 && _BHJet[holeIndex].x > 0.0)
+        AccumulateJetGeodesic(thetaMotion, rad, lambdaPhysicalTotal, xi, eta, a, holeIndex,
+                              jetRGeo, rHorizon, jetF, jetB);
+    acc.color += jetF + jetB * acc.transmittance;
 
     // Disk already opaque: nothing behind it can show.
     [branch]
@@ -1902,8 +2175,15 @@ void KerrTraceCore(
     [branch]
     if (!polarReady)
         polarCum = MakePolarPhiCum(thetaMotion, xi, a);
-    float finalCosTheta, polarDPhi, thetaDirSign;
-    EvaluateThetaEnd(thetaMotion, polarCum, xi, a, lambdaPhysicalTotal, finalCosTheta, polarDPhi, thetaDirSign);
+    float finalCosTheta, polarDPhi, thetaDirSign, thetaSn2;
+    EvaluateThetaEnd(thetaMotion, polarCum, xi, a, lambdaPhysicalTotal, finalCosTheta, polarDPhi, thetaDirSign, thetaSn2);
+    // Theta(mu) at the end from the theta phase, = sn^2 (a^2 u+ mu^2 + eta) / (1 - mu^2): the expanded
+    // eta + a^2 mu^2 - xi^2 mu^2 / (1 - mu^2) cancels to float noise near a theta turning point (sqrt of it:
+    // ~3e-4 rad of direction that jittered as the scene moved, at a hand-off stop)
+    float ThetaEndStable = (thetaSn2 >= 0.0)
+        ? thetaSn2 * (a * a * thetaMotion.uPlus * finalCosTheta * finalCosTheta + eta)
+          / max(1.0 - finalCosTheta * finalCosTheta, 1e-8)
+        : -1.0;
 
     totalDPhi += polarDPhi;
     totalDPhi = fmod(totalDPhi, TWO_PI);
@@ -1934,8 +2214,15 @@ void KerrTraceCore(
         float DeltaE = max(KerrDelta(rE, a), 1e-6);
         float AE = KerrAkerr(rE, stE, a);
         float Xr = rE * rE + a * a - a * xi;
+        // R from the trace's own roots: near the turning point (a stop just past it) the expanded quartic
+        // cancels to float noise -- a radial direction off by ~3e-4 rad that jittered as the scene moved
         float RE = max(Xr * Xr - DeltaE * (eta + (xi - a) * (xi - a)), 0.0);
-        float ThE = max(eta + a * a * ctE * ctE - xi * xi * ctE * ctE / (stE * stE), 0.0);
+        if (rad.numRealRoots == 4)
+            RE = max((rE - rad.r1) * (rE - rad.r2) * (rE - rad.r3) * (rE - rad.r4), 0.0);
+        else if (rad.numRealRoots == 2)
+            RE = max((rE - rad.r1) * (rE - rad.r2) * ((rE - rad.r3) * (rE - rad.r3) + rad.r4 * rad.r4), 0.0);
+        float ThE = (ThetaEndStable >= 0.0) ? ThetaEndStable
+                  : max(eta + a * a * ctE * ctE - xi * xi * ctE * ctE / (stE * stE), 0.0);
         float alphaE = sqrt(DeltaE * SigmaE / AE);
         float omegaE = 2.0 * KERR_M * a * rE / AE;
         float Ezamo = (1.0 - omegaE * xi) / alphaE;
@@ -1959,7 +2246,8 @@ void KerrTraceCore(
 
     // Outgoing asymptote (for chaining through further black holes).
     float sinTs = max(sinFinalTheta, 1e-4);
-    float ThetaInf = max(eta + a * a * finalCosTheta * finalCosTheta
+    float ThetaInf = (ThetaEndStable >= 0.0) ? ThetaEndStable
+                   : max(eta + a * a * finalCosTheta * finalCosTheta
                          - xi * xi * finalCosTheta * finalCosTheta / (sinTs * sinTs), 0.0);
     float3 eThetaL = float3(finalCosTheta * cosP, finalCosTheta * sinP, -sinFinalTheta);
     float3 ePhiL = float3(-sinP, cosP, 0.0);
@@ -1972,4 +2260,4 @@ void KerrTraceCore(
     didEscape = true;
     outTransmittance = acc.transmittance;
 }
-#endif
+#endif

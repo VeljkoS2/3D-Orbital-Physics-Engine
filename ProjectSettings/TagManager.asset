@@ -11,6 +11,7 @@ TagManager:
   - TimeScaleSlider
   - Ring
   - 2DRing
+  - CoordinateSphere
   layers:
   - Default
   - TransparentFX

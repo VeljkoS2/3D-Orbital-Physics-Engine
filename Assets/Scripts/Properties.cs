@@ -67,9 +67,10 @@ public class Properties : MonoBehaviour
         {
             CalculateBlackHoleParamaters(this);
             AssignBlackHoleAppearanceProperties(this);
-            radius = blackHoleParamaters.schwarzschildRadiusWorld*1.1f;
+            radius = blackHoleParamaters.schwarzschildRadiusWorld;
             blackHoleParamaters.diskInnerRadiusNormalized = 2.0f;
-            blackHoleParamaters.diskOuterRadiusNormalized = 12.0f;//rnd.NextFloat(clamped * 0.8f, clamped * 1.2f);
+            var diskRnd = new Unity.Mathematics.Random((uint)System.DateTime.Now.Ticks * 347796405u | 1u);
+            blackHoleParamaters.diskOuterRadiusNormalized = math.abs(diskRnd.NextFloat(-12.0f, 50.0f));//rnd.NextFloat(clamped * 0.8f, clamped * 1.2f);
             blackHoleParamaters.escapeRadiusNormalized = blackHoleParamaters.diskOuterRadiusNormalized * 2.0f;
             var spinRnd = new Unity.Mathematics.Random((uint)System.DateTime.Now.Ticks * 747796405u | 1u); // seed must be non-zero
             blackHoleParamaters.spin = spinRnd.NextFloat();
@@ -79,7 +80,7 @@ public class Properties : MonoBehaviour
             //gameObject.AddComponent<BlackHoleLod>();
             type = 3;
             //double visualInfluenceRadius = blackHoleParamaters.schwarzschildRadiusUnits*2.6;
-            //transform.localScale = new Vector3((float)(visualInfluenceRadius) * 2f, (float)(visualInfluenceRadius) * 2f, (float)(visualInfluenceRadius) * 2f);
+            transform.localScale = new Vector3((float)(radius/GlobalProperties.scale) * 2f, (float)(radius / GlobalProperties.scale) * 2f, (float)(radius / GlobalProperties.scale) * 2f);
         }
         else if (mass > 2e29)
         {

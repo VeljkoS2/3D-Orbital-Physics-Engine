@@ -62,6 +62,10 @@ float4 _BHDiskThick[9];
 // Noise mip for the volume. The reduced-res pass sets log2(downsample): in volumetric mode
 // nothing is re-shaded at full resolution, so the reduced-res samples must not alias.
 static float g_bhDiskLod = 0.0;
+// a trace continued from where an earlier one of the same ray stopped (a hand-off): the image order its first
+// equator crossing has (g_orderBase, in), and the order the next crossing after this trace would have (out)
+static float g_orderBase = 0.0;
+static float g_orderOut = 0.0;
 
 #define VOL_EDGE   0.2         // edge width / H
 #define VOL_CORE   0.7493372   // 1 - VOL_EDGE sqrt(pi/2): flat core half-height
@@ -199,6 +203,10 @@ float PolarPhiAtLambda(ThetaMotion tm, PolarPhiCum pc, float a, float lambda, fl
     float chi = atan2(sncn.x, pc.c * sncn.y);
     return k * pc.P + PolarPhiJChi(pc, a, chi, t) - pc.I0;
 }
+
+// an equator crossing within |cos theta| < this of the camera is (partly) the camera's own: it does not make the
+// images after it higher-order ones (the disk's image order, the jets in front of / behind the disk)
+#define KERR_ORDER_MU_EPS 0.01
 
 // Theta-phase distance from an equator crossing at which |cos theta| = muT (0: never below)
 float ThetaPhaseHalfWidth(ThetaMotion tm, float muT)
@@ -411,7 +419,7 @@ float3 VolSource(VolPoint p, float tauV, DiskCtx dc)
 }
 
 // Gas at a sample point (p.phi must be set).
-void VolShade(inout VolPoint p, VolRay vr, int order, DiskCtx dc,
+void VolShade(inout VolPoint p, VolRay vr, float order, DiskCtx dc,
               Texture2D _Noise, SamplerState sampler_Noise)
 {
     p.kA = 0.0;
@@ -430,7 +438,7 @@ void VolShade(inout VolPoint p, VolRay vr, int order, DiskCtx dc,
     float diskSpan = rOut - rIsco;
 
     // fades, as the sheet: higher-order images, tides (the outer edge is handled below)
-    float fade = exp(-(float) order * dc.ap2.w) * (1.0 - _BHDiskCut[hd.h].x) * VolFunnel(p.mu);
+    float fade = exp(-order * dc.ap2.w) * (1.0 - _BHDiskCut[hd.h].x) * VolFunnel(p.mu);
     float cutR = _BHDiskCut[hd.h].y;
     if (cutR > 0.0)
         fade *= smoothstep(0.5 * cutR, 1.1 * cutR, r);
@@ -488,7 +496,7 @@ void VolShade(inout VolPoint p, VolRay vr, int order, DiskCtx dc,
     float C = _BHVolume.x;
     float sN = 0.0;
     [branch]
-    if (order < 2 && C > 0.0) // (a ternary would sample the texture either way)
+    if (order < 1.5 && C > 0.0) // (a ternary would sample the texture either way)
         sN = DiskNoise3D(rTex, phiTex, OmegaTex, drdtTex, p.q * _BHVolume2.z, dc, dGen);
     float dens = exp(C * sN - 0.5 * C * C);
     float CA = 1.75 * C;
@@ -530,7 +538,7 @@ void VolShade(inout VolPoint p, VolRay vr, int order, DiskCtx dc,
 }
 
 // Point at lam, azimuth continued from pFrom with the trapezoid rule, shaded.
-VolPoint VolAt(VolRay vr, float lam, VolPoint pFrom, int order, DiskCtx dc,
+VolPoint VolAt(VolRay vr, float lam, VolPoint pFrom, float order, DiskCtx dc,
                Texture2D _Noise, SamplerState sampler_Noise)
 {
     VolPoint p = VolGeometry(vr, lam, dc);
@@ -803,13 +811,27 @@ void AccumulateDiskVolume(
     int k0 = (int) ceil((tm.s0 - 0.25) / 0.5);              // first crossing ahead: image order 0
     int kStart = (int) ceil((tm.s0 - 0.25 - halfU) / 0.5);  // first slab reaching the start
                                                             // (camera inside the disk)
+    // ...which makes the later ones higher-order images only once it is clear of the camera: in full from
+    // ~0.6 deg (|cos theta| = 0.01) on, not at all right at it. A camera in the disk's plane (orbits in it:
+    // common) has that crossing at itself, ahead or behind by a float rounding: the far side's image flipped
+    // between order 0 and 1 (faded, thinner, fewer steps) -- flickering patches.
+    float wK0 = saturate((0.25 + 0.5 * (float) k0 - tm.s0) / max(ThetaPhaseHalfWidth(tm, KERR_ORDER_MU_EPS), 1e-6));
     [loop]
     for (int it = 0; it < KERR_MAX_CROSSINGS + 2; it++)
     {
         int k = kStart + it;
-        int order = max(k - k0, 0);
-        if (order >= KERR_MAX_CROSSINGS)
+        float order = g_orderBase + ((k <= k0) ? 0.0 : (float) (k - k0 - 1) + wK0);
+        if (order >= (float) KERR_MAX_CROSSINGS)
             break;
+        // higher-order images: thin rings squeezed toward the photon ring, faded by Higher Order Fade --
+        // a fraction of the samples (the ring around the hole is where the marches pile up), none once
+        // they have faded away
+        float fadeO = exp(-order * dc.ap2.w);
+        if (order > 0.0 && fadeO < 0.01)
+            break;
+        float ordScale = exp2(-min(order, 2.0));   // 1, 0.5, 0.25
+        int maxStepsO = max((int) ((float) maxSteps * ordScale), 4);
+        float nStepsO = max(nSteps * ordScale, 2.0);
         float lamC = (0.25 + 0.5 * (float) k - tm.s0) / vr.uPerLambda;
         if (lamC - halfLam >= win.y)
             break;
@@ -841,12 +863,12 @@ void AccumulateDiskVolume(
         float depth = p0.tauV; // optical depth below the core's surface the ray can have reached
 
         [loop]
-        for (int j = 0; j < maxSteps; j++)
+        for (int j = 0; j < maxStepsO; j++)
         {
             if (p0.lam >= lb)
                 break;
             // the last step of the budget takes whatever is left of the interval
-            float dl = (j == maxSteps - 1) ? (lb - p0.lam) : min(VolStep(p0, vr, nSteps, qTop), lb - p0.lam);
+            float dl = (j == maxStepsO - 1) ? (lb - p0.lam) : min(VolStep(p0, vr, nStepsO, qTop), lb - p0.lam);
             VolPoint p1 = VolAt(vr, p0.lam + dl, p0, order, dc, _Noise, sampler_Noise);
             float2 t = VolTau(p0, p1, dl);
             float dTau = t.x + t.y;
@@ -875,13 +897,13 @@ void AccumulateDiskVolume(
                 // checks made the reconstruction reject nearly every wispy cell (full-res traces)
                 if (acc.transmittance < 0.01)
                 {
-                    acc.crossingCount = order + 1;
+                    acc.crossingCount = (int) order + 1;
                     return;
                 }
             }
             p0 = p1;
         }
-        acc.crossingCount = order + 1;
+        acc.crossingCount = (int) order + 1;
     }
 }
 

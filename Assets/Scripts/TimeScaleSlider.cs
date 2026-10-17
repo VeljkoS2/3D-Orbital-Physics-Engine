@@ -7,13 +7,13 @@ public class TimeScaleSlider : MonoBehaviour
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
     {
-        gameManager = GameObject.FindGameObjectWithTag("GameManager");
-        gameObject.GetComponent<UnityEngine.UI.Slider>().value = math.log10((float)gameManager.GetComponent<GlobalProperties>().userSetTimeScale);
+        //gameManager = GameObject.FindGameObjectWithTag("GameManager");
+        //gameObject.GetComponent<UnityEngine.UI.Slider>().value = 1; //math.log10((float)gameManager.GetComponent<GlobalProperties>().userSetTimeScale);
     }
 
     // Update is called once per frame
     void Update()
     {
-        if (GlobalProperties.paused) gameObject.GetComponent<UnityEngine.UI.Slider>().value = 0;
+        //if (GlobalProperties.paused) gameObject.GetComponent<UnityEngine.UI.Slider>().value = 0;
     }
 }

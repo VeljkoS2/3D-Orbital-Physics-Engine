@@ -159,7 +159,8 @@ public class GlobalProperties : MonoBehaviour
 
     public void SetUserSetTimeScale(float value)
     {
-        userSetTimeScale = math.pow(10, value);
+        if (value == 0) userSetTimeScale = 0.0;
+        else userSetTimeScale = math.pow(10, value-1);
         GameObject[] rings = GameObject.FindGameObjectsWithTag("Ring");
         foreach (var r in rings)
         {
