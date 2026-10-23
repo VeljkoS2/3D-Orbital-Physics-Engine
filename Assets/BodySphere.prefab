@@ -12,6 +12,10 @@ PrefabInstance:
       propertyPath: m_Name
       value: BodySphere
       objectReference: {fileID: 0}
+    - target: {fileID: 100000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
+      propertyPath: m_TagString
+      value: Body
+      objectReference: {fileID: 0}
     - target: {fileID: 400000, guid: 1cc11ffbe578fa547b800e780e45b9c1, type: 3}
       propertyPath: m_LocalPosition.x
       value: 0
@@ -81,7 +85,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b23267dc67cf0c24e91cd9089e161989, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Properties
-  mass: 1
+  mass: 4e+40
   hasAtmosphere: 0
   hasRings: 0
   worldPosition:
@@ -96,8 +100,9 @@ MonoBehaviour:
     x: 0
     y: 0
     z: 0
-  rotationalPeriod: 86400
-  startingRotation: {x: 0, y: 1, z: 0}
+  radius: 0
+  rotationalPeriod: 0
+  startingRotation: {x: 45, y: 1, z: 0}
   dominantBody: {fileID: 0}
   orbitalParamaters:
     semiMajorAxis: 0
@@ -146,6 +151,7 @@ MonoBehaviour:
     diskDopplerColor: 0
     diskDopplerBeaming: 0
     diskRadialContrast: 0
+    diskVisibleLight: 0
     diskBrightness: 0
     diskISCOStress: 0
     diskTurbulance: 0
@@ -158,3 +164,4 @@ MonoBehaviour:
     eddingtonRatio: 0.000000001
     diskTint: {r: 0, g: 0, b: 0, a: 0}
     diskTintStrength: 0
+  starMaterial: {fileID: 2100000, guid: f74bf9e8fc0f5eb4e868f964e54f6c3c, type: 2}

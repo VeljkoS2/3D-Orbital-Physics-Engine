@@ -11,7 +11,6 @@ using UnityEngine;
 // returns early only when two black holes touch, so BlackHoleMerger.TryMerge runs as before.
 public class Yoshida : MonoBehaviour
 {
-    List<GameObject> bodies;
     double[] yoshidaC;
     double[] yoshidaD;
     readonly double cbrt2 = math.pow(2.0, 1.0 / 3.0);
@@ -45,7 +44,6 @@ public class Yoshida : MonoBehaviour
 
     void Start()
     {
-        bodies = GlobalProperties.bodies;
         double w1 = 1.0 / (2.0 - cbrt2);
         double w0 = -cbrt2 * w1;
         yoshidaC = new double[] { w1 / 2.0, (w0 + w1) / 2.0, (w0 + w1) / 2.0, w1 / 2.0 };
@@ -87,11 +85,11 @@ public class Yoshida : MonoBehaviour
 
     void Gather()
     {
-        n = bodies.Count;
+        n = GlobalProperties.bodies.Count;
         EnsureCapacity(n);
         for (int i = 0; i < n; i++)
         {
-            Properties p = bodies[i].GetComponent<Properties>();
+            Properties p = GlobalProperties.bodies[i].GetComponent<Properties>();
             props[i] = p;
             pos[i] = p.worldPosition;
             vel[i] = p.velocity;
@@ -192,7 +190,7 @@ public class Yoshida : MonoBehaviour
             if (result[1] != 0)
             {
                 Scatter();
-                BlackHoleMerger.TryMerge(bodies, bhManager, mergerRecoil);
+                BlackHoleMerger.TryMerge(GlobalProperties.bodies, bhManager, mergerRecoil);
                 Gather();
             }
         }
@@ -242,10 +240,10 @@ public class Yoshida : MonoBehaviour
             double rSOI = soi[i];
             if (rSOI <= 0) continue;
             double dist = math.length(pos[b] - pos[i]);
-            if (dist < rSOI && rSOI < minSOI && mass[i] >= mass[b])
+            if (dist < rSOI && rSOI < minSOI && mass[i] > mass[b])
             {
                 minSOI = rSOI;
-                pb.dominantBody = bodies[i];
+                pb.dominantBody = GlobalProperties.bodies[i];
             }
         }
         if (pb.dominantBody == null)
@@ -256,10 +254,10 @@ public class Yoshida : MonoBehaviour
                 if (i == b) continue;
                 double distSq = math.lengthsq(pos[i] - pos[b]);
                 double gForce = (Constants.G * mass[b] * mass[i]) / distSq;
-                if (gForce > maxGForce && mass[i] >= mass[b])
+                if (gForce > maxGForce && mass[i] > mass[b])
                 {
                     maxGForce = gForce;
-                    pb.dominantBody = bodies[i];
+                    pb.dominantBody = GlobalProperties.bodies[i];
                 }
             }
         }

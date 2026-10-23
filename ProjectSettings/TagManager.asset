@@ -12,6 +12,8 @@ TagManager:
   - Ring
   - 2DRing
   - CoordinateSphere
+  - PlacedBodySphere
+  - Light
   layers:
   - Default
   - TransparentFX

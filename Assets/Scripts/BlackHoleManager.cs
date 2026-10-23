@@ -10,13 +10,13 @@ public class BlackHoleGlobalManager : MonoBehaviour
     const double DiskNoiseLifeOrbits = 2.0;   // DISK_NOISE_LIFE_ORBITS
     const double DiskDrift = 0.02;            // KERR_DISK_DRIFT
     const double KerrM = 0.5;                 // KERR_M
+    const double JetAccelRs = 150.0;          // JET_ZACC (jet knots: the flow's acceleration length, Rs)
+    const double JetKnotK = 2.8853901;        // JET_KNOT_K (knots per e-fold of height near the base)
     public const int PlungeLutWidth = 64;     // BH_PLUNGE_LUT_W (height = MaxBlackHoles)
     const float ObserverShiftStrength = 1.0f;
     // The exact sphere never disappears: it shrinks continuously toward this floor
     // (isotropic Rs), inside the photon sphere, where everything is captured anyway.
     const float KerrFloorRs = 0.55f;
-
-    public List<GameObject> blackHoles = GlobalProperties.blackHoles;
 
     [Header("Multi-hole lensing")]
     [Tooltip("Exact Kerr sphere radius (Rs) at spin 0 and at full spin.")]
@@ -33,10 +33,13 @@ public class BlackHoleGlobalManager : MonoBehaviour
     public float mergerRingdownM = 100f;
     [Tooltip("Stretches the plunge and the hand-over in simulation time. 1 = physical.")]
     public float mergerTimeStretch = 1f;
+    const double MergerMinPlungeLightTimes = 6.0;   // the final plunge lasts at least this many light-crossings of the gap
+    const float JetMinStrength = 0.01f;   // jets fade out between 2x this and this (then BH_JETS goes off)
     [Tooltip("The holes' disks are torn up and swallowed in the plunge, and the gas " +
              "the tides flung out falls back afterwards, re-forming the remnant's disk from its outer edge " +
              "inward (it reaches the hot inner disk last). How long that takes, in orbits at the outer edge " +
-             "(simulation time, times Merger Time Stretch). 0 = at once.")]
+             "(simulation time, times Merger Time Stretch). 0 = at once. (A companion lighter than Gap Mass Ratio " +
+             "never touched the big hole's disk: it falls in and the disk stays as it is.)")]
     [Min(0f)] public float diskRefillOrbits = 10f;
     [Tooltip("A much lighter hole entering a big hole's disk loses its own disk on the way in: 0 = gone right at the " +
              "big disk's edge, 1 = only at its inner edge. In between: shrinks from the edge, gone at that fraction of " +
@@ -95,7 +98,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
     [Range(0.0005f, 0.05f)] public float volumetricGasThickness = 0.003f;
     [Tooltip("Vertical optical depth through the disk outside the ISCO. Real disks: 1e3-1e5 (opaque). " +
              "Below ~10 the disk turns translucent (stylised). The plunging gas thins out on its own.")]
-    [Min(0.1f)] public float volumetricOpticalDepth = 1000f;
+    [Min(0.0f)] public float volumetricOpticalDepth = 1000f;
     [Tooltip("Samples through the local disk thickness (face-on); inclined views use more, up to the budget.")]
     [Range(2, 24)] public int volumetricSteps = 8;
     [Tooltip("Sample budget per disk image (edge-on views use the most).")]
@@ -188,6 +191,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
     static readonly int KerrFLUTId = Shader.PropertyToID("_KerrFLUT");
     static readonly int BHNoiseSizeId = Shader.PropertyToID("_BHNoiseSize");
     static readonly int BHDiskTintId = Shader.PropertyToID("_BHDiskTint");
+    static readonly int BHDiskLightId = Shader.PropertyToID("_BHDiskLight");
     static readonly int BHSpinJId = Shader.PropertyToID("_BHSpinJ");
     static readonly int BHDiskCutId = Shader.PropertyToID("_BHDiskCut");
     static readonly int BHLensCoverageId = Shader.PropertyToID("_BHLensCoverage");
@@ -214,6 +218,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
     readonly Vector4[] diskConst0 = new Vector4[DiskSlots];
     readonly Vector4[] diskConst1 = new Vector4[DiskSlots];
     readonly Vector4[] diskTints = new Vector4[DiskSlots];
+    readonly Vector4[] diskLight = new Vector4[DiskSlots];   // x: visible-light weighting 0..1
     readonly Vector4[] spinJ = new Vector4[MaxBlackHoles];
     readonly Vector4[] diskCut = new Vector4[DiskSlots];
 
@@ -239,6 +244,10 @@ public class BlackHoleGlobalManager : MonoBehaviour
         public Properties props;
         public double genPhase;
         public float textureAngle;
+        // jet knots: knots launched so far (0..1000, the shader's pattern wraps there), in the hole's own time;
+        // and how visible they are (faded to their mean while each frame moves them too far to follow)
+        public double jetPhase;
+        public float jetKnotVis = 1f;
 
         public float keySpin = float.NaN, keyRot = float.NaN, keyStress = float.NaN;
         public double rIsco, omegaIn, life, drdtIsco, eIsco, lIsco, fluxNorm, rLow;
@@ -274,6 +283,21 @@ public class BlackHoleGlobalManager : MonoBehaviour
         public BlackHoleParamaters renderBh;
     }
     readonly Dictionary<GameObject, HoleState> states = new Dictionary<GameObject, HoleState>();
+    // A hole listed twice in GlobalProperties.blackHoles (a body spawned at runtime: its own Start and
+    // GlobalProperties' LateUpdate both added it) was packed twice: two coincident copies -- twice the mass, a "merger"
+    // pair, a group nested in the big hole's region, cut away past a plane through the camera. Once per hole.
+    readonly HashSet<HoleState> listedOnce = new HashSet<HoleState>();
+    bool warnedDuplicate;
+    bool FirstListing(HoleState st)
+    {
+        if (listedOnce.Add(st)) return true;
+        if (!warnedDuplicate)
+        {
+            warnedDuplicate = true;
+            Debug.LogWarning("BlackHoleGlobalManager: '" + st.go.name + "' is in GlobalProperties.blackHoles more than once (used once).");
+        }
+        return false;
+    }
     readonly HoleState[] packed = new HoleState[MaxBlackHoles];
 
     readonly HoleState[] rowOwner = new HoleState[MaxBlackHoles];
@@ -283,6 +307,9 @@ public class BlackHoleGlobalManager : MonoBehaviour
     float noiseMean = 0.5f;
     Texture noiseMeanSource;
     GlobalKeyword singleHoleKeyword;
+    // on while some hole has jets: without it the shader compiles the (large) jet code out -- fewer registers,
+    // more occupancy for every pass, no register spilling in the multi-hole trace
+    GlobalKeyword jetsKeyword;
 
     // ---- merger animation --------------------------------------------------------
     class MergeAnim
@@ -298,6 +325,8 @@ public class BlackHoleGlobalManager : MonoBehaviour
         public double phase1SimT;  // simT when the hand-over started
         public double handoverT;   // hand-over length (sim s)
         public float createdA, createdB;   // both disks as set up, captured at the merger (Unity units)
+        public bool light;         // the one that falls in is below GapMassRatio of the survivor: the survivor
+                                   // keeps its disk, spin and tilt (no tear-up, no spin-down, no re-forming disk)
     }
     MergeAnim anim;
 
@@ -311,6 +340,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
     void OnEnable()
     {
         singleHoleKeyword = GlobalKeyword.Create("BH_SINGLE");
+        jetsKeyword = GlobalKeyword.Create("BH_JETS");
         volumetricKeyword = GlobalKeyword.Create("BH_VOLUMETRIC_DISK");
         if (plungeLut == null)
         {
@@ -348,6 +378,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
                 genPhase = rng.NextDouble() * 1024.0,
                 textureAngle = (float)(rng.NextDouble() * 2.0 * System.Math.PI)
             };
+            st.jetPhase = rng.NextDouble() * 1000.0;
             st.origOuterW = bh.accretionDisk ? bh.diskOuterRadiusNormalized * bh.schwarzschildRadiusUnits : 0f;
             st.permOuterW = st.origOuterW;
             states[hole] = st;
@@ -725,6 +756,9 @@ public class BlackHoleGlobalManager : MonoBehaviour
     // ---------------------------------------------------------------------------
     void Update()
     {
+        var kb = UnityEngine.InputSystem.Keyboard.current;
+        if (dumpOnF9 && kb != null && kb.f9Key.wasPressedThisFrame)
+            dumpRequested = true;
         if (noiseTexture != null && noiseTexture != noiseMeanSource)
         {
             noiseMean = ComputeMeanRed(noiseTexture);
@@ -742,17 +776,36 @@ public class BlackHoleGlobalManager : MonoBehaviour
         }
         foreach (var kv in states)
             if (kv.Value.refillAge < 0.0   // (re-forming after a merger: drains once formed)
-                && !(anim != null && anim.phase == 0 && (kv.Value == anim.survivor || kv.Value == anim.ghost)))
+                && !(anim != null && anim.phase == 0
+                     && (kv.Value == anim.ghost || (kv.Value == anim.survivor && !anim.light))))
                 DrainStep(kv.Value, simDt);
 
-        foreach (var hole in blackHoles)
+        listedOnce.Clear();
+        foreach (var hole in GlobalProperties.blackHoles)
         {
             if (hole == null) continue;
             var st = GetState(hole);
+            if (!FirstListing(st)) continue;   // (its hot spots aged twice as fast)
             var bh = st.props.blackHoleParamaters;
 
             double rsOverC = 2.0 * Constants.G * bh.mass / (Constants.C * Constants.C) / Constants.C;
-            if (System.Math.Abs(st.omegaIn) < 1e-12 || rsOverC <= 0.0) continue;
+            if (rsOverC <= 0.0) continue;
+
+            // jet knots: launched one every JetAccelRs / (JetKnotK beta) Rs/c of the hole's time (the shader's
+            // JetKnots), at the simulation's time scale; paused, they stop
+            {
+                double lorentz = System.Math.Max(jetLorentz, 1.0001);
+                double beta = System.Math.Sqrt(1.0 - 1.0 / (lorentz * lorentz));
+                double knots = simDt / rsOverC * JetKnotK * beta / JetAccelRs;
+                st.jetPhase += knots;
+                st.jetPhase -= 1000.0 * System.Math.Floor(st.jetPhase / 1000.0);
+                // more than ~1/10 of a knot per frame (the fine octave's spacing is 0.37) and they strobe instead
+                // of moving: fade them to their mean (eased over ~0.3 s, so frame-time jitter does not flicker)
+                float target = 1f - Mathf.SmoothStep(0f, 1f, (float)((System.Math.Abs(knots) - 0.08) / 0.12));
+                st.jetKnotVis = Mathf.Lerp(st.jetKnotVis, target, 1f - Mathf.Exp(-Time.unscaledDeltaTime / 0.3f));
+            }
+
+            if (System.Math.Abs(st.omegaIn) < 1e-12) continue;
 
             double lifeSeconds = st.life * rsOverC;
             st.genPhase += simDt / lifeSeconds;
@@ -889,6 +942,10 @@ public class BlackHoleGlobalManager : MonoBehaviour
     //                      point ARE one Schwarzschild hole: the switch is invisible.
     //  phase 1 (hand-over): the remnant's spin builds up from 0; its disk re-forms from the
     //                      gas the tides flung out (diskRefillOrbits).
+    //  A light companion (below GapMassRatio: it never cleared a gap, the tides left the big disk alone) just
+    //  falls in -- within about an orbit: below the ISCO it plunges, it does not inspiral -- and the big hole is
+    //  left as it was: its spin, tilt and disk carry straight on (its disk vanished and re-formed, its spin dipped
+    //  to 0 and its disk flipped into the companion's orbital plane at the hand-over).
     // ---------------------------------------------------------------------------
     public void OnMerger(GameObject keep, GameObject gone, Vector3 offKeep, Vector3 offGone, Vector3 lHat,
                          float rsKeep, float rsGone, float spinKeep, float spinGone,
@@ -910,6 +967,16 @@ public class BlackHoleGlobalManager : MonoBehaviour
             ? (5.0 / 32.0) * D0 * D0 * D0 * D0 / (c * r1 * r2 * (r1 + r2)) * mergerTimeStretch
             : 0.0;
         double omega0 = D0 > 0.0 ? System.Math.Sqrt(0.5 * c * c * (r1 + r2) / (D0 * D0 * D0)) / mergerTimeStretch : 0.0;
+        // (at most an orbit: a light one touching the big one is far inside its ISCO -- it plunges. Peters' inspiral
+        // time grows as 1 / mass ratio: ~10^7 light-crossing times for 1e-8, the ghost circling inside the shadow)
+        if (omega0 > 0.0)
+            plungeT = System.Math.Min(plungeT, 2.0 * System.Math.PI / omega0);
+        // ...and two comparable holes close no faster than a few light-crossing times of the gap: Peters' law,
+        // extrapolated to contact, closed the last 0.8 (Rs1 + Rs2) in ~0.5 Rs / c -- under a frame: the two shadows'
+        // peanut snapped into the remnant's round one, ~8 % bigger, in one step. Merging takes ~10 - 20 M in numerical
+        // relativity; starting at the orbit's own angular velocity, the pair now turns about once more as it closes.
+        if (!(rsGone < GapMassRatio * rsKeep))
+            plungeT = System.Math.Max(plungeT, MergerMinPlungeLightTimes * D0 / c * mergerTimeStretch);
 
         anim = new MergeAnim
         {
@@ -932,7 +999,8 @@ public class BlackHoleGlobalManager : MonoBehaviour
             spinF = spinF,
             upF = upF,
             createdA = GetState(keep).createdOuterW,
-            createdB = GetState(gone).createdOuterW
+            createdB = GetState(gone).createdOuterW,
+            light = rsGone < GapMassRatio * rsKeep
         };
     }
 
@@ -963,7 +1031,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
         var bh = s.props.blackHoleParamaters;
         // (the tides may have torn both disks down to nothing on the way in -- Accretion Disk off -- but the gas
         // they flung out is still there: the remnant's disk forms from it whenever either hole had one)
-        bool hadDisk = bh.accretionDisk || anim.createdA > 0f || anim.createdB > 0f;
+        bool hadDisk = !anim.light && (bh.accretionDisk || anim.createdA > 0f || anim.createdB > 0f);
         if (hadDisk)
         {
             if (!bh.accretionDisk)
@@ -1052,15 +1120,16 @@ public class BlackHoleGlobalManager : MonoBehaviour
                 Vector3 off = q * (isS ? anim.offA : anim.offB) * frac;
                 st.renderPos = anim.survivor.go.transform.position + off;   // survivor = centre of mass
                 st.renderRs = (isS ? anim.rsA : anim.rsB) * Mathf.Lerp(1f, anim.massKeep, x);
-                st.renderSpin = Mathf.Lerp(isS ? anim.spinA : anim.spinB, 0f, x);
+                st.renderSpin = (isS && anim.light) ? anim.spinA : Mathf.Lerp(isS ? anim.spinA : anim.spinB, 0f, x);
                 st.renderUp = isS ? anim.upA : anim.upB;
             }
             else if (anim.phase == 1 && st == anim.survivor)
             {
-                // start in the orbit's plane, then tilt with the spin to its final direction
+                // start in the orbit's plane, then tilt with the spin to its final direction (a light one's: from
+                // the big hole's own spin and tilt -- barely changed)
                 float v = Mathf.SmoothStep(0f, 1f, HandoverT());
-                st.renderSpin = anim.spinF * v;
-                st.renderUp = Vector3.Slerp(anim.lHat, anim.upF, v).normalized;
+                st.renderSpin = anim.light ? Mathf.Lerp(anim.spinA, anim.spinF, v) : anim.spinF * v;
+                st.renderUp = Vector3.Slerp(anim.light ? anim.upA : anim.lHat, anim.upF, v).normalized;
             }
         }
         bh.spin = st.renderSpin;
@@ -1070,14 +1139,20 @@ public class BlackHoleGlobalManager : MonoBehaviour
 
     void OnBeginCameraRendering(ScriptableRenderContext context, Camera cam)
     {
+        // the renderer feature never draws for these (BlackHoleRendererFeature): don't rebuild the per-frame
+        // state for them (it is camera-relative; the game camera rebuilds it for itself anyway)
+        if (cam.cameraType == CameraType.Preview || cam.cameraType == CameraType.Reflection)
+            return;
         AdvanceMergeAnim();
 
         int count = 0;
-        foreach (var hole in blackHoles)
+        listedOnce.Clear();
+        foreach (var hole in GlobalProperties.blackHoles)
         {
             if (hole == null) continue;
             if (count >= MaxBlackHoles) break;
             var st = GetState(hole);
+            if (!FirstListing(st)) continue;
             RenderState(st);
             UpdateDerived(st, st.renderBh, st.props.blackHoleAppearanceProperties);
             packed[count++] = st;
@@ -1297,9 +1372,14 @@ public class BlackHoleGlobalManager : MonoBehaviour
                     jetS *= edd / 0.1f * refill * diskJ;
                 }
             }
+            // a jet too faint to see still switched the whole jet code on for every pixel (BH_JETS): in a close pair's
+            // view, ~1.6x the frame and the GPU spilling registers, for a jet at 0.6 % (its disk torn by the other
+            // hole). Below JetMinStrength it fades out to 0, and with no jet left the code is compiled out.
+            jetS *= Mathf.SmoothStep(0f, 1f, jetS / JetMinStrength - 1f);
             // y: the near-camera term's scale for this hole (shader, straight view past it)
             float rCam = rs > 0f ? Vector3.Distance(cam.transform.position, holePos[i]) / rs : 0f;
-            jetData[i] = new Vector4(jetS, NearCameraScale(rCam, holeMedium[i]), 0f, 0f);
+            // z, w: the knots' clock and visibility (Update)
+            jetData[i] = new Vector4(jetS, NearCameraScale(rCam, holeMedium[i]), (float)st.jetPhase, st.jetKnotVis);
 
             diskConst0[i] = new Vector4((float)st.rIsco, (float)st.life, (float)st.omegaIn, (float)st.drdtIsco);
             diskConst1[i] = new Vector4((float)st.eIsco, (float)st.lIsco, (float)st.fluxNorm, (float)st.rLow);
@@ -1318,6 +1398,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
             diskTints[i] = tintLum > 1e-4f
                 ? new Vector4(lin.r / tintLum, lin.g / tintLum, lin.b / tintLum, bp.diskTintStrength)
                 : new Vector4(1f, 1f, 1f, 0f);
+            diskLight[i] = new Vector4(Mathf.Clamp01(bp.diskVisibleLight), 0f, 0f, 0f);
         }
         if (lutDirty)
             plungeLut.Apply(false, false);
@@ -1363,6 +1444,7 @@ public class BlackHoleGlobalManager : MonoBehaviour
         Shader.SetGlobalVectorArray(BHDiskCutId, diskCut);
 
         Shader.SetGlobalVectorArray(BHDiskTintId, diskTints);
+        Shader.SetGlobalVectorArray(BHDiskLightId, diskLight);
         Shader.SetGlobalVectorArray(BHHotSpotsId, hotSpots);
         Shader.SetGlobalVectorArray(BHHotSpotBoundsId, hotSpotBounds);
         Shader.SetGlobalInt(BHCountId, count);
@@ -1370,6 +1452,9 @@ public class BlackHoleGlobalManager : MonoBehaviour
         Shader.SetGlobalVectorArray(BHParamsId, parameters);
         Shader.SetGlobalVectorArray(BHDiskNormalsId, diskNormals);
         for (int j = count; j < MaxBlackHoles; j++) jetData[j] = Vector4.zero;
+        bool anyJet = false;
+        for (int j = 0; j < count; j++) anyJet |= jetData[j].x > 0f;
+        Shader.SetKeyword(jetsKeyword, anyJet);
         Shader.SetGlobalVectorArray(BHJetId, jetData);
         Shader.SetGlobalVector(BHJetParamsId, new Vector4(Mathf.Tan(0.5f * jetOpeningDeg * Mathf.Deg2Rad),
                                                           Mathf.Max(jetLorentz, 1.0001f), jetLengthRs, jetBaseRs));
@@ -1392,5 +1477,77 @@ public class BlackHoleGlobalManager : MonoBehaviour
         Shader.SetGlobalTexture(KerrSnCnLUTId, kerrSnCnLUT);
         Shader.SetGlobalTexture(KerrKLUTId, kerrKLUT);
         Shader.SetGlobalTexture(KerrFLUTId, kerrFLUT);
+
+        if (dumpRequested && cam == Camera.main)
+        {
+            dumpRequested = false;
+            DumpShaderState(cam);
+        }
+    }
+
+    // ---- debug: what the black hole shader gets this frame, and the camera (F9) ------------------------
+    [Header("Debug dump")]
+    [Tooltip("F9 in play mode writes everything the black hole shader gets this frame (and the camera) to " +
+             "BlackHoleDump.json next to the Assets folder, so the frame can be reproduced exactly outside Unity.")]
+    public bool dumpOnF9 = true;
+    bool dumpRequested;
+
+    static string F(float v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+    static string V(Vector4 v) => "[" + F(v.x) + "," + F(v.y) + "," + F(v.z) + "," + F(v.w) + "]";
+    static string V3s(Vector3 v) => "[" + F(v.x) + "," + F(v.y) + "," + F(v.z) + "]";
+
+    void DumpShaderState(Camera cam)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("{\n");
+        sb.Append("\"_BHCount\": ").Append(Shader.GetGlobalInt(BHCountId)).Append(",\n");
+        string[] arrays = { "_BHPositionsCamRelative", "_BHParams", "_BHDiskNormals", "_BHRotationOffsets", "_BHSpins",
+                            "_BHAppearanceProperties1", "_BHAppearanceProperties2", "_BHDiskConst0", "_BHDiskConst1",
+                            "_BHHotSpots", "_BHHotSpotBounds", "_BHDiskTint", "_BHSpinJ", "_BHDiskCut", "_BHJet",
+                            "_BHDiskThick", "_BHDiskLight" };
+        foreach (var name in arrays)
+        {
+            var arr = Shader.GetGlobalVectorArray(name);
+            sb.Append("\"").Append(name).Append("\": [");
+            if (arr != null)
+                for (int i = 0; i < arr.Length; i++)
+                    sb.Append(i > 0 ? "," : "").Append(V(arr[i]));
+            sb.Append("],\n");
+        }
+        string[] vectors = { "_BHJetParams", "_BHJetColor", "_BHVolume", "_BHVolume2", "_BHObserverTint", "_BHNoiseSize",
+                             "_BHSkyboxSize" };
+        foreach (var name in vectors)
+            sb.Append("\"").Append(name).Append("\": ").Append(V(Shader.GetGlobalVector(name))).Append(",\n");
+        string[] floats = { "_BHNoiseMean", "_BHLensCoverage", "_BHObserverG" };
+        foreach (var name in floats)
+            sb.Append("\"").Append(name).Append("\": ").Append(F(Shader.GetGlobalFloat(name))).Append(",\n");
+        sb.Append("\"keywords\": {\"BH_SINGLE\": ").Append(Shader.IsKeywordEnabled(singleHoleKeyword) ? 1 : 0)
+          .Append(", \"BH_VOLUMETRIC_DISK\": ").Append(Shader.IsKeywordEnabled(volumetricKeyword) ? 1 : 0)
+          .Append(", \"BH_JETS\": ").Append(Shader.IsKeywordEnabled(jetsKeyword) ? 1 : 0).Append("},\n");
+        var t = cam.transform;
+        sb.Append("\"camera\": {\"position\": ").Append(V3s(t.position))
+          .Append(", \"forward\": ").Append(V3s(t.forward)).Append(", \"up\": ").Append(V3s(t.up))
+          .Append(", \"right\": ").Append(V3s(t.right)).Append(", \"fov\": ").Append(F(cam.fieldOfView))
+          .Append(", \"width\": ").Append(cam.pixelWidth).Append(", \"height\": ").Append(cam.pixelHeight)
+          .Append(", \"near\": ").Append(F(cam.nearClipPlane)).Append(", \"far\": ").Append(F(cam.farClipPlane)).Append("},\n");
+        sb.Append("\"holes\": [");
+        int n = 0;
+        foreach (var hole in GlobalProperties.blackHoles)
+        {
+            if (hole == null) continue;
+            var pr = hole.GetComponent<Properties>();
+            var bh = pr.blackHoleParamaters;
+            sb.Append(n++ > 0 ? "," : "").Append("{\"name\": \"").Append(hole.name).Append("\", \"position\": ")
+              .Append(V3s(hole.transform.position)).Append(", \"up\": ").Append(V3s(hole.transform.up))
+              .Append(", \"mass\": ").Append(pr.mass.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+              .Append(", \"rsUnits\": ").Append(F(bh.schwarzschildRadiusUnits)).Append(", \"spin\": ").Append(F(bh.spin))
+              .Append(", \"diskOuter\": ").Append(F(bh.diskOuterRadiusNormalized))
+              .Append(", \"accretionDisk\": ").Append(bh.accretionDisk ? 1 : 0).Append("}");
+        }
+        sb.Append("],\n");
+        sb.Append("\"merger\": ").Append(anim != null ? anim.phase : -1).Append("\n}\n");
+        string path = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Application.dataPath), "BlackHoleDump.json");
+        System.IO.File.WriteAllText(path, sb.ToString());
+        Debug.Log("BlackHoleGlobalManager: shader state written to " + path);
     }
 }

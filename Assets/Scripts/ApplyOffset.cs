@@ -6,15 +6,14 @@ using System.Collections.Generic;
 
 public class ApplyOffset : MonoBehaviour
 {
-    List<GameObject> bodies;
-    public double distanceFromFocus { get; set; } = 1e8;
+    public double distanceFromFocus = 1.0;
     Properties focusP = null;
     Transform bodyT = null;
     Properties bodyP = null;
     // Start is called once before the first execution of Update afters the MonoBehaviour is created
     void Start()
     {
-        bodies = GlobalProperties.bodies;
+
     }
 
     // Update is called once per frame
@@ -27,7 +26,7 @@ public class ApplyOffset : MonoBehaviour
             Vector3 tempPosition = new Vector3((float)(tempPositionD.x/GlobalProperties.scale), (float)(tempPositionD.y/GlobalProperties.scale), (float)(tempPositionD.z/GlobalProperties.scale));
             if (tempPosition.magnitude < focusP.radius * 1.1/GlobalProperties.scale)
             {
-                distanceFromFocus = focusP.radius * 1.11/GlobalProperties.scale;
+                distanceFromFocus = focusP.radius * 1.11;
                 GlobalProperties.offset = Camera.main.GetComponent<Move>().direction * distanceFromFocus - focusP.worldPosition;
                 tempPositionD = GlobalProperties.offset + focusP.worldPosition;
                 tempPosition = new Vector3((float)(tempPositionD.x / GlobalProperties.scale), (float)(tempPositionD.y / GlobalProperties.scale), (float)(tempPositionD.z / GlobalProperties.scale));
@@ -39,7 +38,7 @@ public class ApplyOffset : MonoBehaviour
         }
 
 
-        foreach (GameObject b in bodies)
+        foreach (GameObject b in GlobalProperties.bodies)
         {
             bodyT = b.transform;
             bodyP = b.GetComponent<Properties>();

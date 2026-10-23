@@ -53,6 +53,9 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
     class BlackHoleRendererFeaturePass : ScriptableRenderPass
     {
         readonly BlackHoleRendererFeatureSettings settings;
+        // per camera: is it on the close setting? (the switch has a band: hovering at the threshold, every crossing
+        // swapped the downsample -- and with it the disk turbulence's detail and the jets' blur, a visible pop)
+        readonly System.Collections.Generic.Dictionary<int, bool> closeState = new System.Collections.Generic.Dictionary<int, bool>();
 
         static readonly int Low0Id = Shader.PropertyToID("_BHLow0");
         static readonly int Low1Id = Shader.PropertyToID("_BHLow1");
@@ -60,6 +63,8 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
         static readonly int LowSizeId = Shader.PropertyToID("_BHLowSize");
         static readonly int DownsampleId = Shader.PropertyToID("_BHDownsample");
         static readonly int LensCoverageId = Shader.PropertyToID("_BHLensCoverage");
+        static readonly int TraceGridId = Shader.PropertyToID("_BHTraceGrid");
+        static readonly int CountId = Shader.PropertyToID("_BHCount");
 
         // Shader pass indices
         const int CompositePass = 0;   // light: early-outs, weak-only, reconstruction; marks stencil
@@ -76,13 +81,14 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
             public TextureHandle source;
             public Material material;
             public float downsample;
+            public Vector4 lowSize, traceGrid;
         }
 
         class CompositePassData
         {
             public TextureHandle source;
             public TextureHandle low0, low1, low2;
-            public Vector4 lowSize;
+            public Vector4 lowSize, traceGrid;
             public float downsample;
             public Material material;
         }
@@ -114,6 +120,10 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
             if (settings.lensingMaterial == null)
                 return;
 
+            // no black holes this frame: nothing to lens -- skip all three fullscreen passes (and the copies)
+            if (Shader.GetGlobalInt(CountId) <= 0)
+                return;
+
             UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
             UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
 
@@ -141,16 +151,24 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
             // coverage of this camera's screen by lensing, set by BlackHoleGlobalManager
             // in beginCameraRendering (which runs before this, for the same camera)
             float coverage = Shader.GetGlobalFloat(LensCoverageId);
-            int dsWanted = coverage > settings.closeCoverageThreshold
-                ? settings.traceDownsampleClose
-                : settings.traceDownsample;
+            int camId = cameraData.camera != null ? cameraData.camera.GetInstanceID() : 0;
+            closeState.TryGetValue(camId, out bool wasClose);
+            bool close = wasClose
+                ? coverage > settings.closeCoverageThreshold * 0.85f
+                : coverage > settings.closeCoverageThreshold;
+            closeState[camId] = close;
+            int dsWanted = close ? settings.traceDownsampleClose : settings.traceDownsample;
             int fullW = cameraData.cameraTargetDescriptor.width;
             int fullH = cameraData.cameraTargetDescriptor.height;
             if (settings.maxTraceHeight > 0)
                 dsWanted = Mathf.Max(dsWanted, Mathf.CeilToInt(fullH / (float)settings.maxTraceHeight));
             int ds = Mathf.Clamp(dsWanted, 1, 4);
-            int lowW = Mathf.Max(1, (fullW + ds - 1) / ds);
-            int lowH = Mathf.Max(1, (fullH + ds - 1) / ds);
+            // the traces sit on the corners of ds x ds pixel blocks (see _BHTraceGrid in the shader): one more
+            // than the blocks in each direction, so the last block has its far corner
+            int lowW = Mathf.Max(1, (fullW + ds - 1) / ds + 1);
+            int lowH = Mathf.Max(1, (fullH + ds - 1) / ds + 1);
+            var lowSize = new Vector4(lowW, lowH, 1f / lowW, 1f / lowH);
+            var traceGrid = new Vector4(ds / (float)fullW, ds / (float)fullH, fullW / (float)ds, fullH / (float)ds);
 
             // ---- pass 1: exact traces at reduced resolution (3 targets) -------------
             TextureHandle low0 = TextureHandle.nullHandle, low1 = TextureHandle.nullHandle, low2 = TextureHandle.nullHandle;
@@ -165,8 +183,11 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                     passData.source = srcColor;
                     passData.material = settings.lensingMaterial;
                     passData.downsample = ds;
+                    passData.lowSize = lowSize;
+                    passData.traceGrid = traceGrid;
 
                     builder.UseTexture(srcColor);
+                    builder.UseTexture(resourceData.cameraDepthTexture);   // (texels hidden behind the scene: skipped)
                     builder.SetRenderAttachment(low0, 0);
                     builder.SetRenderAttachment(low1, 1);
                     builder.SetRenderAttachment(low2, 2);
@@ -174,6 +195,8 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                     builder.SetRenderFunc((TracePassData data, RasterGraphContext context) =>
                     {
                         data.material.SetFloat(DownsampleId, data.downsample);
+                        data.material.SetVector(LowSizeId, data.lowSize);
+                        data.material.SetVector(TraceGridId, data.traceGrid);
                         Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, TraceLowResPass);
                     });
                 }
@@ -187,7 +210,8 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                 passData.low0 = low0;
                 passData.low1 = low1;
                 passData.low2 = low2;
-                passData.lowSize = new Vector4(lowW, lowH, 1f / lowW, 1f / lowH);
+                passData.lowSize = lowSize;
+                passData.traceGrid = traceGrid;
                 passData.downsample = ds;
 
                 builder.UseTexture(srcColor);
@@ -209,6 +233,7 @@ public class BlackHoleRendererFeature : ScriptableRendererFeature
                         data.material.SetTexture(Low1Id, (RTHandle)data.low1);
                         data.material.SetTexture(Low2Id, (RTHandle)data.low2);
                         data.material.SetVector(LowSizeId, data.lowSize);
+                        data.material.SetVector(TraceGridId, data.traceGrid);
                     }
                     data.material.SetFloat(DownsampleId, data.downsample);
                     Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, CompositePass);

@@ -44,6 +44,12 @@ Shader "Custom/BlackHoleLensingPassthrough"
         float4 _BHNoiseSize;
         TEXTURECUBE(_BHSkybox); SAMPLER(sampler_BHSkybox);
         TEXTURE2D(_BHNoise); SAMPLER(sampler_BHNoise);
+        // Inline sampler states (Unity reads the filter / wrap from the name): both textures are sampled at a
+        // computed, fractional mip (SkyLod, the disk's turbulence LOD). Their own samplers follow the import
+        // settings -- Bilinear there means NO blending between mips: the level jumped where the footprint crossed
+        // half a level, rings of sharper / blurrier sky around the hole and contour lines across the disk.
+        SAMPLER(sampler_trilinear_clamp);
+        SAMPLER(sampler_trilinear_repeat);
 
         float DomainRadius(int i) { return _BHParams[i].x * _BHParams[i].w; }
 
@@ -92,6 +98,17 @@ Shader "Custom/BlackHoleLensingPassthrough"
         //    produces them -> leading order only (tested: 0.75 px boundary jump instead
         //    of 3.3 px). Otherwise they use y = Rs / (distance to THIS segment).
         //  Spin: kick = 2 d x integral B dt, scale-free closed form.
+        // g(t1) - g(0), g = (t - tca) / h (s = t - tca, h = sqrt(s^2 + b^2)), without subtracting two values ~1: on a
+        // line pointing at (or away from) a hole far off it was float noise / b -- a straight piece toward a big hole
+        // 1e9 units away got a 0.1 rad bend, one wrong pixel (a block after the rebuild) where the view faced it
+        float WeakDG(float s0, float s1, float h0, float h1, float b2, float t1, bool toInf)
+        {
+            if (toInf) return (s0 > 0.0) ? b2 / ((h0 + s0) * h0) : 1.0 - s0 / h0;
+            return (s0 * s1 > 0.0) ? b2 * t1 * (s1 + s0) / ((s1 * h0 + s0 * h1) * h0 * h1) : s1 / h1 - s0 / h0;
+        }
+        // 2 - |A|, A = u (2u^2 + 3) / (1 + u^2)^1.5 (the spin integral's), from w = b^2 / h^2: ~0.75 w^2 far out
+        float SpinE(float w) { return w * w * (3.0 + w) / (2.0 + sqrt(max(1.0 - w, 0.0)) * (2.0 + w)); }
+
         void WeakKick(float3 d, float3 toBH, float rs, float3 J, float t1, float hoR,
                       out float3 kick, out float3 disp)
         {
@@ -106,34 +123,37 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float x = rs / b;
             float y = (b < hoR) ? 0.0 : rs / rSeg;
             float C = x * (1.0 + y * ((15.0 * PI / 32.0) + y * ((8.0 / 3.0) + y * (3465.0 * PI / 2048.0))));
-            float h0 = sqrt(tca * tca + b * b);
-            float g0 = -tca / h0;
+            float b2 = b * b;
+            float s0 = -tca;
+            float h0 = sqrt(tca * tca + b2);
             float s1 = t1 - tca;
-            float h1 = toInf ? 1.0 : sqrt(s1 * s1 + b * b);
-            float g1 = toInf ? 1.0 : s1 / h1;
-            kick = C * (g1 - g0) * toward;
+            float h1 = toInf ? 1.0 : sqrt(s1 * s1 + b2);
+            float dg = WeakDG(s0, s1, h0, h1, b2, t1, toInf);
+            kick = C * dg * toward;
             disp = float3(0, 0, 0);
             if (!toInf)
                 disp = C * WeakDrift(t1, tca, b, h0, s1, h1) * toward;
 
-            float u0 = -tca / b;
-            float q0 = h0 / b;
-            float iq03 = 1.0 / (q0 * q0 * q0);
-            float A0 = u0 * (2.0 * u0 * u0 + 3.0) * iq03;
-            float C0 = u0 / q0;
-            float A1 = 2.0, Q1 = 0.0, C1 = 1.0;
-            if (!toInf)
+            // spin: A, Q = (b / h)^3, C (= g) at both ends; A as sign (2 - E), differences of same-signed ends from E
+            float w0 = b2 / (h0 * h0);
+            float E0 = SpinE(w0);
+            float iq03 = w0 * sqrt(w0);
+            float sg0 = (s0 >= 0.0) ? 1.0 : -1.0;
+            float dA, Q1 = 0.0;
+            if (toInf)
+                dA = (sg0 > 0.0) ? E0 : 4.0 - E0;
+            else
             {
-                float u1 = s1 / b;
-                float q1 = h1 / b;
-                float iq13 = 1.0 / (q1 * q1 * q1);
-                A1 = u1 * (2.0 * u1 * u1 + 3.0) * iq13;
-                Q1 = iq13;
-                C1 = u1 / q1;
+                float w1 = b2 / (h1 * h1);
+                float E1 = SpinE(w1);
+                Q1 = w1 * sqrt(w1);
+                float sg1 = (s1 >= 0.0) ? 1.0 : -1.0;
+                dA = (sg0 == sg1) ? sg0 * (E0 - E1) : sg1 * (2.0 - E1) - sg0 * (2.0 - E0);
             }
-            float3 I = (dot(J, bh) * (A1 - A0) - dot(J, d) * (Q1 - iq03)) * bh - (C1 - C0) * J;
-            // second-order spin-mass coupling (10 pi a M^2 / b^3): tested vs exact Kerr
-            kick += (2.0 / (b * b)) * (1.0 + (5.0 * PI / 4.0) * x) * cross(d, I);
+            float3 I = (dot(J, bh) * dA - dot(J, d) * (Q1 - iq03)) * bh - dg * J;
+            // second-order spin-mass coupling (10 pi a M^2 / b^3): tested vs exact Kerr (y: the distance to this
+            // segment -- the closest approach's b where it is on it; x = Rs / b blew up on lines aimed at the hole)
+            kick += (2.0 / b2) * (1.0 + (5.0 * PI / 4.0) * min(x, rs / rSeg)) * cross(d, I);
         }
                 // The weak formula assumes the ray comes from infinity; from a camera at distance
         // r0 it over-bends by Rs^2 / (b r0) (fitted vs exact Kerr, r0 = 40-200 Rs; tested:
@@ -147,11 +167,12 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float3 pOff = tca * d - toBH;
             float b = max(length(pOff), 1e-6);
             float r0 = max(length(toBH), 1e-6);
-            float g0 = -tca / sqrt(tca * tca + b * b);
+            float b2 = b * b;
             float s1 = t1 - tca;
-            float g1 = (t1 > 1e30) ? 1.0 : s1 * rsqrt(s1 * s1 + b * b);
+            bool toInf = (t1 > 1e30);
+            float dg = WeakDG(-tca, s1, sqrt(tca * tca + b2), toInf ? 1.0 : sqrt(s1 * s1 + b2), b2, t1, toInf);
             float sc = (_BHJet[h].y > 0.0) ? _BHJet[h].y : 1.0;
-            return (sc * rs * rs / (b * r0)) * 0.5 * (g1 - g0) * (pOff / b);
+            return (sc * rs * rs / (b * r0)) * 0.5 * dg * (pOff / b);
         }
         float3 NearCameraTerm(float3 d, float3 toBH, float rs, int h) { return NearCameraTermTo(d, toBH, rs, 3.0e38, h); }
 
@@ -255,8 +276,25 @@ Shader "Custom/BlackHoleLensingPassthrough"
             kick += (x * x * x * a3 - (3465.0 * PI / 1024.0) * x * x * x * x * (P1 - P0)) * away;
         }
 
-        // weak bend of the group members in gMask on the segment p + t d, t in [0, t1]
-        void GroupWeakKick(float3 p, float3 d, float t1, int count, uint gMask, out float3 kick, out float3 disp)
+        // the displacement at t1 of the leading-order mass bend (WeakKick's, alone)
+        float3 WeakDisp(float3 d, float3 toBH, float rs, float t1)
+        {
+            float tca = dot(toBH, d);
+            float3 pOff = tca * d - toBH;
+            float b = max(length(pOff), 1e-6);
+            float rSeg = max(length(toBH - d * clamp(tca, 0.0, t1)), b);
+            float x = rs / b;
+            float y = rs / rSeg;
+            float C = x * (1.0 + y * ((15.0 * PI / 32.0) + y * ((8.0 / 3.0) + y * (3465.0 * PI / 2048.0))));
+            float h0 = sqrt(tca * tca + b * b);
+            float s1 = t1 - tca;
+            float h1 = sqrt(s1 * s1 + b * b);
+            return -C * WeakDrift(t1, tca, b, h0, s1, h1) * (pOff / b);
+        }
+
+        // weak bend of the group members in gMask on the segment p + t d, t in [0, t1]; for those in gInf (whole
+        // groups) the bend runs on to infinity -- the displacement is still the one at t1
+        void GroupWeakKickInf(float3 p, float3 d, float t1, int count, uint gMask, uint gInf, out float3 kick, out float3 disp)
         {
             kick = float3(0, 0, 0);
             disp = float3(0, 0, 0);
@@ -266,11 +304,13 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 if (((gMask >> (uint)i) & 1u) == 0u) continue;
                 float rsI = _BHParams[i].x;
                 float3 Pi = _BHPositionsCamRelative[i].xyz;
+                bool inf = ((gInf >> (uint)i) & 1u) != 0u;
+                float t1i = inf ? 3.0e38 : t1;
                 float3 kw, dw;
-                WeakKick(d, Pi - p, rsI, SpinJ(i), t1, 3.0e38, kw, dw);   // 1st order + spin only
+                WeakKick(d, Pi - p, rsI, SpinJ(i), t1i, 3.0e38, kw, dw);   // 1st order + spin only
                 kick += kw;
-                disp += dw;
-                SecondOrderKick(p, d, t1, Pi, rsI * rsI, kick, disp);
+                disp += inf ? WeakDisp(d, Pi - p, rsI, t1) : dw;
+                SecondOrderKick(p, d, t1i, Pi, rsI * rsI, kick, disp);
                 float rsT = rsI;
                 float3 cSum = rsI * Pi;
                 bool firstOfGroup = true;
@@ -280,14 +320,18 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     if (j == i || ((gMask >> (uint)j) & 1u) == 0u || _BHSpins[j].z != _BHSpins[i].z) continue;
                     float rsJ = _BHParams[j].x;
                     float3 Pj = _BHPositionsCamRelative[j].xyz;
-                    if (j > i) SecondOrderKick(p, d, t1, 0.5 * (Pi + Pj), 2.0 * rsI * rsJ, kick, disp);
+                    if (j > i) SecondOrderKick(p, d, t1i, 0.5 * (Pi + Pj), 2.0 * rsI * rsJ, kick, disp);
                     else firstOfGroup = false;
                     rsT += rsJ;
                     cSum += rsJ * Pj;
                 }
                 if (firstOfGroup)
-                    GroupHighOrder(p, d, t1, cSum / rsT, rsT, kick);
+                    GroupHighOrder(p, d, t1i, cSum / rsT, rsT, kick);
             }
+        }
+        void GroupWeakKick(float3 p, float3 d, float t1, int count, uint gMask, out float3 kick, out float3 disp)
+        {
+            GroupWeakKickInf(p, d, t1, count, gMask, 0u, kick, disp);
         }
 
         float SceneEyeDepth(float2 uv)
@@ -302,13 +346,29 @@ Shader "Custom/BlackHoleLensingPassthrough"
         }
 
         #define BH_UPS_MAX_SPREAD 8.0   // max direction spread, in low-res texel angles
-        #define BH_UPS_MAX_TWIST  1.0   // max interpolation error, in units of 1/4 screen pixel
+        // ...tested only where the sky shows through at least this much (T, the most of the cell's four): behind gas
+        // that lets less through, the sky's share is small, and a cell whose directions spread (the sky lensed into a
+        // ring close to a hole) is rebuilt with its sky blurred over the spread instead of traced pixel by pixel. With
+        // the camera inside the gas a few Rs from a hole, that ring was ~3/4 of the full-res traces (9 % of the screen,
+        // the sky behind it at T ~0.1): now ~1/4 as many, the image within 2/255 but along the ring's lensed stars.
+        #define BH_UPS_SKY_T      0.3
+        // max interpolation error, in units of 1/4 screen pixel: 2 = the sky at most half a pixel off where the cell's
+        // directions are farthest from bilinear (1 sent twice the cells to the full-res trace -- up to half of pass 2
+        // -- for differences < 2/255 after tonemapping nearly everywhere; none along an edge)
+        #define BH_UPS_MAX_TWIST  2.0
     #if defined(BH_VOLUMETRIC_DISK)
         #define BH_UPS_MAX_DT     0.8   // soft volumetric gas interpolates fine
     #else
         #define BH_UPS_MAX_DT     0.4
     #endif
         #define BH_UPS_MAX_DPHI   1.0
+        #ifndef BH_UPS_MAX_DEM
+        #define BH_UPS_MAX_DEM    0.25   // max emission spread in a cell, on the scale L / (L + knee)
+        #endif
+        #ifndef BH_UPS_EM_KNEE
+        #define BH_UPS_EM_KNEE    0.25   // HDR luminance that counts as mid-grey for that test
+        #endif
+        #define BH_LUMA float3(0.2126, 0.7152, 0.0722)
         #define BH_UPS_MAX_DR     0.3
 
         float4 _BHObserverTint;
@@ -327,7 +387,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
 
         float3 SampleSky(float3 dir, float footprint)
         {
-            return SAMPLE_TEXTURECUBE_LOD(_BHSkybox, sampler_BHSkybox, dir, SkyLod(footprint)).rgb;
+            return SAMPLE_TEXTURECUBE_LOD(_BHSkybox, sampler_trilinear_clamp, dir, SkyLod(footprint)).rgb;
         }
 
         Texture2D<float4> _BHLow0;
@@ -335,6 +395,16 @@ Shader "Custom/BlackHoleLensingPassthrough"
         Texture2D<float4> _BHLow2;
         float4 _BHLowSize;
         float _BHDownsample;
+        // The reduced-res traces sit on the CORNERS of downsample x downsample pixel blocks (texel i at full-res
+        // pixel edge i * ds): x = ds / full width, y = ds / full height, z = full width / ds, w = full height / ds
+        // (C#). Every reconstruction cell is then one block -- whole 2x2 quads at ds = 2 and 4. With the traces
+        // at the blocks' centres the cells straddled the quads at ds = 2, and every full-res trace of a failed
+        // cell came with a helper lane tracing the same (the trace ends in ddx / ddy): ~1.8x the pass-2 work.
+        float4 _BHTraceGrid;
+        float2 LowTexelUV(float2 texcoord) { return (texcoord * _BHLowSize.xy - 0.5) * _BHTraceGrid.xy; }
+        // Weak-field texels of the reduced-res trace carry this in their class's fraction (below 0.25: no first
+        // crossing for Reconstruct), so the composite can rebuild the jets on weak-field pixels from them
+        #define BH_WEAK_TAG 0.125
 
         #define BH_WHY_NONE      0
         #define BH_WHY_HORIZON   1
@@ -461,13 +531,25 @@ Shader "Custom/BlackHoleLensingPassthrough"
         {
             float k = sqrt(A) * 0.70710678 / s;
             float x1 = (ta - tS) * k, x2 = (tb - tS) * k;
-            float d = (abs(x2 - x1) < 1e-2) ? 1.1283792 * exp(-0.25 * (x1 + x2) * (x1 + x2)) * (x2 - x1)
-                                             : JetErf(x2) - JetErf(x1);
+            float d = 2.0;   // the whole crossing in the piece (|x| > 4.5 on both sides: erf saturated to 1e-10)
+            [branch]
+            if (x1 > -4.5 || x2 < 4.5)
+                d = (abs(x2 - x1) < 1e-2) ? 1.1283792 * exp(-0.25 * (x1 + x2) * (x1 + x2)) * (x2 - x1)
+                                          : JetErf(x2) - JetErf(x1);
             return exp(-0.5 * b2 / (s * s)) * (0.88622693 * d / k);
         }
 
+        // fade of a straight piece's jet near its hole (Rs): fR > 0 faded in over fR / 2 .. fR (inside, the exact
+        // trace samples it along the geodesic); fR < 0 the complement (only inside: for a ray the trace sampled none)
+        float JetFade(float fR, float dist)
+        {
+            float k = smoothstep(0.5 * abs(fR), abs(fR), dist);
+            return (fR > 0.0) ? k : 1.0 - k;
+        }
+
         // the lobe sgn (+1 / -1 along the axis) of hole h's jet on o + t d, t in [t0, t1]; fadeR > 0: faded in
-        // over fadeR / 2 .. fadeR from the hole (inside, its exact trace sampled it along the geodesic)
+        // over fadeR / 2 .. fadeR from the hole (inside, its exact trace sampled it along the geodesic); < 0: the
+        // complement (JetFade)
         float3 JetSeg(int h, float3 o, float3 d, float t0, float t1, float sgn, float fadeR)
         {
             // in Rs from here
@@ -523,7 +605,8 @@ Shader "Custom/BlackHoleLensingPassthrough"
             }
 
             float sinP = sqrt(A);
-            float knotAmt = smoothstep(0.15, 0.35, sinP);
+            float knotAmt = smoothstep(0.15, 0.35, sinP) * _BHJet[h].w;
+            float knotClock = _BHJet[h].z;
             float fR = fadeR * irs;
             // the crossing's length scale (sheath)
             float lCross = JetWidthRs(clamp(z0 + tS * dz, zMin, zMax)) / sinP;
@@ -578,9 +661,9 @@ Shader "Custom/BlackHoleLensingPassthrough"
                                           (sg2 * JetGauss(sqrt(ge), A, tS, b2, ta, tb) / ge
                                            - s22 * JetGauss(sqrt(he), A, tS, b2, ta, tb) / he) / (sg2 - s22));
                         float fadeK = 1.0;
-                        if (fR > 0.0)
-                            fadeK = smoothstep(0.5 * fR, fR, sqrt(b2 + zm * zm));
-                        acc += JetLine1(zm, zMin, zMax, sgn, knotAmt) * g * (0.159155 * fadeK * wc);
+                        if (fR != 0.0)
+                            fadeK = JetFade(fR, sqrt(b2 + zm * zm));
+                        acc += JetLine1(zm, zMin, zMax, sgn, knotAmt, knotClock) * g * (0.159155 * fadeK * wc);
                     }
                     [branch]
                     if (wc < 1.0)
@@ -604,9 +687,9 @@ Shader "Custom/BlackHoleLensingPassthrough"
                             float rho2 = b2 + A * (tq - tS) * (tq - tS);
                             float fp = g_jetPix * length(o * irs + d * tq);
                             float fadeK = 1.0;
-                            if (fR > 0.0)
-                                fadeK = smoothstep(0.5 * fR, fR, sqrt(rho2 + zq2 * zq2));
-                            acc += JetLine1(zq2, zMin, zMax, sgn, knotAmt) * JetProfile(rho2, JetWidthRs(zq2), fp * fp)
+                            if (fR != 0.0)
+                                fadeK = JetFade(fR, sqrt(rho2 + zq2 * zq2));
+                            acc += JetLine1(zq2, zMin, zMax, sgn, knotAmt, knotClock) * JetProfile(rho2, JetWidthRs(zq2), fp * fp)
                                  * (wq * fadeK * (1.0 - wc));
                         }
                     }
@@ -685,6 +768,56 @@ Shader "Custom/BlackHoleLensingPassthrough"
             return false;
         }
 
+        // Does any jet in jetMask come within reach of the line (JetLine's own cull, without integrating anything)?
+        bool JetNearAny(float3 o, float3 d, float t0, float t1, int count, uint kinkMask, uint jetMask)
+        {
+        #if !defined(BH_JETS)
+            return false;
+        #else
+            float3 kA = float3(0, 0, 0), dA = float3(0, 0, 0);
+            [loop]
+            for (int j = 0; j < count; j++)
+                if (((kinkMask >> (uint)j) & 1u) != 0u)
+                    JetBend(d, _BHPositionsCamRelative[j].xyz - o, _BHParams[j].x, 3.0e38, kA, dA);
+            float bendA = (kinkMask != 0u) ? length(ApplyKick(d, kA) - d) : 0.0;
+            bool nearAny = false;
+            [loop]
+            for (int h = 0; h < count; h++)
+                nearAny = nearAny || (_BHJet[h].x > 0.0 && ((jetMask >> (uint)h) & 1u) != 0u && JetNear(h, o, d, t0, t1, bendA));
+            return nearAny;
+        #endif
+        }
+
+        // Does the ray from the camera along d pass the jet axis nearest to it before distance tMax? (Of the holes
+        // with jets: the one whose axis comes closest to the ray, and where along the ray that is.)
+        bool JetCrossingBefore(float3 d, float tMax, int count)
+        {
+        #if !defined(BH_JETS)
+            return false;
+        #else
+            float best = 3.0e38, tBest = 3.0e38;
+            [loop]
+            for (int h = 0; h < count; h++)
+            {
+                if (_BHJet[h].x <= 0.0)
+                    continue;
+                float3 c = _BHPositionsCamRelative[h].xyz;
+                float3 n = _BHDiskNormals[h].xyz;
+                float b = dot(d, n);
+                float den = max(1.0 - b * b, 1e-6);
+                float t = (dot(d, c) - b * dot(n, c)) / den;   // the ray's point nearest the axis line
+                float s = (b * dot(d, c) - dot(n, c)) / den;   // ...and the axis's
+                float dist2 = dot(d * t - c - n * s, d * t - c - n * s) / (_BHParams[h].x * _BHParams[h].x);
+                if (dist2 < best)
+                {
+                    best = dist2;
+                    tBest = t;
+                }
+            }
+            return tBest < tMax;
+        #endif
+        }
+
         // The ray's first-order path through the fields of the holes in kinkMask, at s along the unbent line:
         // o + d s + the displacements of each (as a group's legs have it: chord to the displaced entry)
         float3 JetPathAt(float3 o, float3 d, float s, int count, uint kinkMask)
@@ -705,9 +838,10 @@ Shader "Custom/BlackHoleLensingPassthrough"
         // kink at the closest approach put the crossing ~1 Rs off at 35 Rs: 2x at the spine's edge.)
         // Only the jets in jetMask; fadeHole's is faded in over fadeR / 2 .. fadeR (inside, its exact trace
         // sampled it along the geodesic).
-        void JetLine(float3 o, float3 d, float t0, float t1, int count, uint kinkMask, uint jetMask, int fadeHole,
-                     float fadeR, inout float3 nearEm, inout float3 farEm)
+        void JetLineSplit(float3 o, float3 d, float t0, float t1, int count, uint kinkMask, uint jetMask, int fadeHole,
+                          float fadeR, float tSplit, float wAfter, inout float3 nearEm, inout float3 farEm)
         {
+        #if defined(BH_JETS) // (off while no hole has jets: C# turns the keyword off, and all the jet code compiles out)
             float3 dEnd = d;
             [branch]
             if (kinkMask != 0u)
@@ -756,13 +890,25 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     }
                     // the part of [t0, t1] on this piece (lengths along the chord ~ along the unbent line)
                     float sc = (sB < 1e37) ? L / max(sB - sA, 1e-30) : 1.0;
-                    float a0 = max(t0, sA), a1 = min(t1, sB);
-                    [branch]
-                    if (a1 > a0)
+                    // (before / after tSplit: weighted 1 / wAfter -- a piece across it in two parts)
+                    [loop]
+                    for (int q = 0; q < 2; q++)
                     {
-                        float l0 = (a0 - sA) * sc, l1 = (a1 >= 1e37) ? 3.0e30 : (a1 - sA) * sc;
-                        nearEm += JetSeg(h, pA, pd, l0, l1, camSide, fr);
-                        farEm += JetSeg(h, pA, pd, l0, l1, -camSide, fr);
+                        float a0 = (q == 0) ? max(t0, sA) : max(max(t0, sA), tSplit);
+                        float a1 = (q == 0) ? min(min(t1, sB), tSplit) : min(t1, sB);
+                        float wq = (q == 0) ? 1.0 : wAfter;
+                        [branch]
+                        if (a1 > a0 && wq > 0.0)
+                        {
+                            float l0 = (a0 - sA) * sc, l1 = (a1 >= 1e37) ? 3.0e30 : (a1 - sA) * sc;
+                            // both lobes through one JetSeg call site (it is large, and every call is inlined)
+                            [loop]
+                            for (int lobe = 0; lobe < 2; lobe++)
+                            {
+                                float3 e = JetSeg(h, pA, pd, l0, l1, (lobe == 0) ? camSide : -camSide, fr) * wq;
+                                if (lobe == 0) nearEm += e; else farEm += e;
+                            }
+                        }
                     }
                     if (sB >= t1 || sB >= 1e37)
                         break;
@@ -770,6 +916,12 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     pA = pB;
                 }
             }
+        #endif
+        }
+        void JetLine(float3 o, float3 d, float t0, float t1, int count, uint kinkMask, uint jetMask, int fadeHole,
+                     float fadeR, inout float3 nearEm, inout float3 farEm)
+        {
+            JetLineSplit(o, d, t0, t1, count, kinkMask, jetMask, fadeHole, fadeR, 3.0e38, 1.0, nearEm, farEm);
         }
 
 
@@ -786,6 +938,14 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float m2 = dot(toBH, toBH) - tca * tca;
             bool enters = (camHole == 0) || (tca > 0.0 && m2 < R * R);
 
+            // jets on straight lines (one call site: JetLine is large, every call is inlined): outside the region,
+            // the whole bent line; inside, outside where the trace sampled them (min(JET_RGEO, its region), faded
+            // into each other): the camera's line up to the closest approach (in front of the disk), and the
+            // outgoing asymptote from there (behind it, times the disk's transmittance)
+            float jT1 = 3.0e30;
+            int jFade = -1;
+            float jFadeR = 0.0;
+            int nJet = 1;
             [branch]
             if (!enters)
             {
@@ -793,61 +953,70 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 WeakKick(dir, toBH, rs, SpinJ(0), 3.0e38, 0.0, kick, disp);
                 kick += NearCameraTerm(dir, toBH, rs, 0);
                 cr.dir = ApplyKick(dir, kick);
-                float3 jn0 = float3(0, 0, 0), jf0 = float3(0, 0, 0);
-                JetLine(float3(0, 0, 0), dir, 0.0, 3.0e30, count, 1u, 1u, -1, 0.0, jn0, jf0);
-                cr.emAll += jn0 + jf0;
-                return;
             }
-
-            float3 color, exitPos, exitDir; bool escaped; float trans;
-            bool hf; float4 fc; float fi; float3 ef;
-            g_dbgTraces += 1.0;
-            g_jetFootRs = g_jetPix * length(toBH) / rs;
-            KerrTraceCore(
-                dir, toBH, rs,
-                _BHParams[0].y, _BHParams[0].z, _BHParams[0].w,
-                _BHDiskNormals[0].xyz,
-                _BHSpins[0].x, _BHSpins[0].y,
-                _BHNoise, sampler_BHNoise,
-                _BHRotationOffsets[0].x, _BHRotationOffsets[0].yz,
-                1e30, true, _BHSpins[0].w > 0.5,
-                color, exitPos, exitDir, _BHAppearanceProperties1[0], _BHAppearanceProperties2[0],
-                escaped, trans, hf, fc, fi, ef, 0, min(JET_RGEO, _BHParams[0].w));
-
-            cr.firstHole = 0;
-            cr.hasFirst = hf;
-            cr.firstCross = fc;
-            cr.firstIdx = fi;
-            cr.emFirst = ef;
-            cr.traces = 1;
-            cr.emAll = color;
-            cr.T = trans;
-            cr.anyStrong = true;
-            cr.path = 4;
-            cr.captured = !escaped;
-            if (!escaped)
-                cr.why = BH_WHY_HORIZON;
             else
-                cr.dir = exitDir;
-
-            // jets on straight lines outside where the trace sampled them (min(JET_RGEO, its region), faded
-            // into each other): the camera's line up to the closest approach (in front of the disk), and the
-            // outgoing asymptote from there (behind it)
-            [branch]
-            if (_BHJet[0].x > 0.0)
             {
-                float rG = min(JET_RGEO, _BHParams[0].w) * rs;
-                float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
-                // (the same path the straight view outside its region takes: through its displaced points)
-                JetLine(float3(0, 0, 0), dir, 0.0, max(tca, 0.0), count, 1u, 1u, 0, rG, jn, jf);
-                cr.emAll += jn + jf;
+                float3 color, exitPos, exitDir; bool escaped; float trans;
+                bool hf; float4 fc; float fi; float3 ef;
+                g_dbgTraces += 1.0;
+                g_jetFootRs = g_jetPix * length(toBH) / rs;
+                // aimed at the centre: its jets on the straight line, not along the geodesic (JetOnLine)
+                bool onLine = (tca > 0.0) && JetOnLine(sqrt(max(m2, 0.0)), rs, _BHSpins[0].x);
+                KerrTraceCore(
+                    dir, toBH, rs,
+                    _BHParams[0].y, _BHParams[0].z, _BHParams[0].w,
+                    _BHDiskNormals[0].xyz,
+                    _BHSpins[0].x, _BHSpins[0].y,
+                    _BHNoise, sampler_trilinear_repeat,
+                    _BHRotationOffsets[0].x, _BHRotationOffsets[0].yz,
+                    1e30, true, _BHSpins[0].w > 0.5,
+                    color, exitPos, exitDir, _BHAppearanceProperties1[0], _BHAppearanceProperties2[0],
+                    escaped, trans, hf, fc, fi, ef, 0, onLine ? 0.0 : min(JET_RGEO, _BHParams[0].w));
+
+                cr.firstHole = 0;
+                cr.hasFirst = hf;
+                cr.firstCross = fc;
+                cr.firstIdx = fi;
+                cr.emFirst = ef;
+                cr.traces = 1;
+                cr.emAll = color;
+                cr.T = trans;
+                cr.anyStrong = true;
+                cr.path = 4;
+                // An opaque disk (trans < 0.01: the trace stopped there) is NOT a capture: nothing behind it shows
+                // either way, but as "captured" every opacity contour of the gas split the reconstruction classes
+                // and went to the full-res trace (most of pass 2 with the volumetric disk). Only the horizon is.
+                cr.captured = !escaped && trans >= 0.01;
+                if (cr.captured)
+                    cr.why = BH_WHY_HORIZON;
+                else if (escaped)
+                    cr.dir = exitDir;
+
+                jT1 = max(tca, 0.0);
+                jFade = 0;
+                jFadeR = min(JET_RGEO, _BHParams[0].w) * rs;
+                nJet = (_BHJet[0].x > 0.0) ? (escaped ? 2 : 1) : 0;
                 [branch]
-                if (escaped)
+                if (onLine)
                 {
-                    float3 on = float3(0, 0, 0), of = float3(0, 0, 0);
-                    JetLine(float3(0, 0, 0), dir, max(tca, 0.0), 3.0e30, count, 1u, 1u, 0, rG, on, of);
-                    cr.emAll += (on + of) * cr.T;
+                    // aimed at the centre (its trace sampled no jets): the straight line, unfaded, up to the
+                    // horizon if it falls in
+                    float rH = (0.5 + sqrt(max(0.25 - 0.25 * _BHSpins[0].x * _BHSpins[0].x, 0.0))) * rs;
+                    jT1 = escaped ? 3.0e30 : max(tca - sqrt(max(rH * rH - m2, 0.0)), 0.0);
+                    jFade = -1;
+                    jFadeR = 0.0;
+                    nJet = (_BHJet[0].x > 0.0) ? 1 : 0;
                 }
+            }
+            [branch]
+            if (nJet > 0)
+            {
+                float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
+                // (the same path the straight view outside its region takes: through its displaced points; one
+                // pass over its pieces for both sides of jT1, the far one behind the disk: times its transmittance)
+                JetLineSplit(float3(0, 0, 0), dir, 0.0, (nJet > 1) ? 3.0e30 : jT1, count, 1u, 1u,
+                             jFade, jFadeR, jT1, cr.T, jn, jf);
+                cr.emAll += jn + jf;
             }
         }
     #else
@@ -957,22 +1126,28 @@ Shader "Custom/BlackHoleLensingPassthrough"
 
         // RK4 through the medium. Returns
         // 0: left every group sphere, 1: reached the exact sphere of hitHole,
-        // 2: inside a photon sphere and falling in (merger mode), 3: step budget used up.
-        // Jets along the way: on secants of up to 8 RK4 steps, cut where the path turns by ~0.01 rad.
-        int IntegrateMedium(inout float3 p, inout float3 d, int count, uint mask, out int hitHole,
-                            inout ChainResult cr, inout bool anyEm)
+        // 2: inside a photon sphere and falling in (merger mode), 3: step budget used up,
+        // 5: a secant's jets due (the caller makes them, then calls again: on from here).
+        // Jets along the way: on secants of up to 16 RK4 steps, cut where the path turns by ~0.01 rad -- the secant
+        // from jA to p (jA = p: none). The caller makes them (TraceChain's one JetLine call site: it is large).
+        // s: the steps taken (the budget: across the calls of one leg).
+        int IntegrateMedium(inout float3 p, inout float3 d, int count, uint mask, out int hitHole, inout int s,
+                            out float3 jA)
         {
             hitHole = -1;
             int ret = 3;
-            float3 jA = p;
+            jA = p;
             float3 jDA = d;
             int jK = 0;
             bool jetsOn = false;
+        #if defined(BH_JETS)
             [loop]
             for (int jh = 0; jh < count; jh++)
                 jetsOn = jetsOn || (_BHJet[jh].x > 0.0);
+        #endif
+            bool due = false;
             [loop]
-            for (int s = 0; s < BH_MED_MAX_STEPS; s++)
+            for (; s < BH_MED_MAX_STEPS; s++)
             {
                 float rMin = 3.0e38;
                 float rsNear = 1.0;
@@ -1048,26 +1223,22 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     }
                     jK++;
                 }
-                // jets on the secant since jA (always before leaving)
-                [branch]
+                // jets on the secant since jA (always before leaving): back to the caller with it
                 if (jetsOn && (stop || jK >= 16 || dot(d, jDA) < 0.9999 || s == BH_MED_MAX_STEPS - 1))
                 {
-                    float3 chord = p - jA;
-                    float cl = length(chord);
-                    [branch]
-                    if (cl > 0.0)
+                    due = true;
+                    if (!stop)
                     {
-                        float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
-                        JetLine(jA, chord / cl, 0.0, cl, count, 0u, mask, -1, 0.0, jn, jf);
-                        cr.emAll += (jn + jf) * cr.T;
+                        s++;
+                        ret = 5;
                     }
-                    jA = p;
-                    jDA = d;
-                    jK = 0;
+                    break;
                 }
                 if (stop)
                     break;
             }
+            if (!due)
+                jA = p;
             return ret;
         }
 
@@ -1075,6 +1246,59 @@ Shader "Custom/BlackHoleLensingPassthrough"
         // unambiguous, so no seam). Overlapping regions (a group): the combined-field
         // integration, entered and left in plain local directions, with leading-order
         // weak segments on both sides (both tested against exact integration).
+        // A separate hole's region reaching into another's (a light companion: C# keeps the big one's region whole
+        // around it): traced first where a ray runs through it, then the big one (or handed over by its trace).
+        // Not only the ones whose region is all inside -- one straddling the big region's edge was traced only
+        // where it came first along the line: past a plane through the camera it vanished (with its lensing).
+        // (the smaller region is the companion's: C# limits it to its tiny share of the distance)
+        bool SatIn(float3 cS, float RS, float3 cH, float RH) { return RS < RH && length(cS - cH) - RS < RH; }
+        // A group nested like that (light companions close to each other: their combined-field sphere inside the
+        // big one's region) is one too: its sphere goes first where a ray runs into it -- the big one's trace from the
+        // camera passed straight through it (half the screen, past the plane through the camera at right angles
+        // to the big one, lost it). This hole's group (its members), or the hole alone.
+        uint GroupBits(int i, int count)
+        {
+            if (!IsMember(i)) return 1u << (uint)i;
+            uint m = 0u;
+            [loop]
+            for (int j = 0; j < count; j++)
+                if (_BHSpins[j].z == _BHSpins[i].z) m |= 1u << (uint)j;
+            return m;
+        }
+        // Is the big hole's field, along this line up to t (a nested one's closest approach), too strong for its weak
+        // bend there -- the ray passing it close first? Only then does its trace hand over at the companion's distance
+        // (the companion on the bent path past it); else the line goes straight on to the companion, the big one's bend
+        // up to there weak (with its displacement). The series' first order left out: ~10 (Rs/b)^4 of the bend.
+        // (A camera near a companion at about its distance from the big one -- the big one's closest approach a
+        // shallow dip just ahead -- went through the hand-off's restart line: lines and bands of wrong pixels.)
+        bool StrongBefore(float3 toT, float3 d, float rsT, float t)
+        {
+            float tc = dot(toT, d);
+            if (tc >= t) return false;
+            float b2 = max(dot(toT, toT) - tc * tc, 1e-30);
+            float y2 = rsT * rsT / b2;
+            float s1 = t - tc;
+            float dg = s1 * rsqrt(s1 * s1 + b2) + tc * rsqrt(tc * tc + b2);   // g(t) - g(0)
+            return 10.0 * y2 * y2 * sqrt(y2) * dg > 1e-4;
+        }
+
+        // is this group (bits) nested in a separate hole's region?
+        bool GroupNested(uint g, int count)
+        {
+            [loop]
+            for (int m = 0; m < count; m++)
+            {
+                if (((g >> (uint)m) & 1u) == 0u) continue;
+                float3 cM = _BHPositionsCamRelative[m].xyz;
+                float RM = DomainRadius(m);
+                [loop]
+                for (int h = 0; h < count; h++)
+                    if (!IsMember(h) && SatIn(cM, RM, _BHPositionsCamRelative[h].xyz, DomainRadius(h)))
+                        return true;
+            }
+            return false;
+        }
+
         void TraceChain(float3 dir, int count, int camHole, out ChainResult cr)
         {
             cr = InitChain(dir);
@@ -1086,6 +1310,12 @@ Shader "Custom/BlackHoleLensingPassthrough"
             uint done = 0u;
             uint handed = 0u;             // holes whose trace was stopped once at a nested satellite's distance
             uint noKick = 0u;             // ... and not yet traced on: their bend is the traces' (no weak kicks)
+            uint seen = 0u;               // groups this ray has been through (their spheres): never again as nested
+            uint medGroup = 0u;           // the group whose sphere the ray is in (or last entered)
+            uint bendDone = 0u;           // whole bend already applied (passed nested ones): no more bends or traces --
+                                          // their jets still drawn on the pieces as before (not done)
+                                          // ones (a hand-off's restart line, back from the big one, crossed the
+                                          // sphere the ray had come through -- integrated twice: a band of garbage)
             int hoHole = -1;              // ... and the image order its continuation starts at
             float hoBase = 0.0;
             float3 hoP = float3(0, 0, 0);  // ... and where it stopped (its trace goes on from there)
@@ -1102,6 +1332,14 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float jetSkip = 0.0;          // the next straight piece's jets start here (behind it: before the ray)
             float3 kP0 = float3(0, 0, 0), kD0 = float3(0, 0, 1);   // a separate hole's leg, unbent (for its jets)
             float kT0 = 0.0;
+            // A straight piece to a satellite nested in a separate hole's region (to its closest approach, with its
+            // bend there; or to its region) left out the hole's gas on it: a camera in the hole's disk saw it cut off
+            // along the plane square to the hole, and a window through it around the satellite. The hole's trace
+            // along the piece first, for its gas (and sheet disk) only -- the ray's path stays the piece's:
+            // gasSt bits 0-7: holes whose gas on the coming piece is taken (cleared when it is run); 8: this exact
+            // trace is that one (up to kT0 along the piece, nothing else kept from it); 12-15: 1 + the satellite it
+            // went up to the middle of (its host's trace on from there). (One register: TraceChain spills.)
+            uint gasSt = 0u;
 
             int camMember = -1;
             [loop]
@@ -1114,6 +1352,8 @@ Shader "Custom/BlackHoleLensingPassthrough"
             }
             if (camMember >= 0)
             {
+                seen = GroupBits(camMember, count);
+                medGroup = seen;
                 firstSeg = false;
                 mode = 1;
                 [loop]
@@ -1129,10 +1369,57 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 }
             }
 
+        #if defined(BH_JETS)
+            // The jets on the straight pieces through ONE JetLine call site: it is large, and every call is inlined
+            // -- seven of them in here made this function 16k instructions longer and spill 75 registers. Each piece
+            // leaves its call (two at most) and the top of the next event makes it; a separate hole's leg leaves its
+            // jets and comes back for the trace (nothing of them stays live across it).
+            float3 jbO = float3(0, 0, 0), jbD = float3(0, 0, 1);
+            float4 jbT = float4(0, 0, 0, 0);   // t0, t1, fadeR, weight
+            uint4 jbM = uint4(0, 0, 0, 0);     // kinkMask, jetMask, fadeHole + 1, pending
+            // a second one on the same line (a pass: its piece, then the passed hole's jets beyond it -- the same start,
+            // weight and no fade): only what differs
+            float jcT1 = 0.0;
+            uint jcK = 0u, jcJ = 0u;
+            bool jcOn = false;
+            bool jPre = false;            // the leg's jets left: on to the trace
+            #define JET_JOB(o_, d_, t0_, t1_, km_, jm_, fh_, fr_, w_) \
+                { jbO = (o_); jbD = (d_); jbT = float4((t0_), (t1_), (fr_), (w_)); \
+                  jbM = uint4((km_), (jm_), (uint)((fh_) + 1), 1u); }
+            #define JET_JOB2(t1_, km_, jm_) { jcT1 = (t1_); jcK = (km_); jcJ = (jm_); jcOn = true; }
+        #else
+            #define JET_JOB(o_, d_, t0_, t1_, km_, jm_, fh_, fr_, w_)
+            #define JET_JOB2(t1_, km_, jm_)
+        #endif
+            bool fin = false;             // ended: its jets left (made at the next top), then out
+            bool medOn = false;           // a combined-field leg on after its secant's jets
+            int medS = 0;                 // ...its steps so far
+
             [loop]
-            for (int ev = 0; ev < BH_MAX_EVENTS; ev++)
+            for (int ev = 0; ev <= BH_MAX_EVENTS; ev++)
             {
+            #if defined(BH_JETS)
+                [loop]
+                for (int jq = 0; jq < 2; jq++)
+                {
+                    if (jbM.w == 0u)
+                        break;
+                    float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
+                    JetLine(jbO, jbD, jbT.x, jbT.y, count, jbM.x, jbM.y, (int)jbM.z - 1, jbT.z, jn, jf);
+                    cr.emAll += (jn + jf) * jbT.w;
+                    jbT.y = jcT1; jbM.xy = uint2(jcK, jcJ);
+                    jbM.w = jcOn ? 1u : 0u;
+                    jcOn = false;
+                }
+                // empty: constants again (else they stayed live through the traces below, where the volume march
+                // needs the registers most)
+                jbO = float3(0, 0, 0); jbD = float3(0, 0, 1); jbT = float4(0, 0, 0, 0); jbM = uint4(0, 0, 0, 0);
+                jcT1 = 0.0; jcK = 0u; jcJ = 0u;
+            #endif
+                if (fin || ev == BH_MAX_EVENTS)
+                    break;
                 uint mask = allMask & ~done;
+                uint kmask = mask & ~bendDone;
 
                 [branch]
                 if (mode == 0)
@@ -1149,10 +1436,10 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     [loop]
                     for (int i = 0; i < count; i++)
                     {
-                        if ((((done | noKick) >> (uint)i) & 1u) != 0u) continue;
+                        if ((((done | noKick | bendDone) >> (uint)i) & 1u) != 0u) continue;
                         float3 toBHi = _BHPositionsCamRelative[i].xyz - p;
                         float Ri = DomainRadius(i);
-                        if (hoPend && (IsMember(i) || length(_BHPositionsCamRelative[i].xyz - cHo) + Ri >= RHo)) continue;
+                        if (hoPend && (((seen >> (uint)i) & 1u) != 0u || !SatIn(_BHPositionsCamRelative[i].xyz, Ri, cHo, RHo))) continue;
                         float tcaI = dot(toBHi, d);
                         float dd = dot(toBHi, toBHi);
                         float m2i = dd - tcaI * tcaI;
@@ -1167,6 +1454,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     // a hole nested in the target's region (a light companion: C# keeps the region whole around it)
                     // and on this line goes first -- the target's exact trace would pass straight through it; the
                     // target is then traced from where the ray leaves it
+                    int host0 = -1;               // the target a nested one went before
                     [branch]
                     if (target >= 0)
                     {
@@ -1177,62 +1465,150 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         [loop]
                         for (int n2 = 0; n2 < count; n2++)
                         {
-                            if (n2 == target || ((done >> (uint)n2) & 1u) != 0u || IsMember(n2)) continue;
+                            if (n2 == target || (((done | seen | bendDone) >> (uint)n2) & 1u) != 0u) continue;
+                            bool nMem = IsMember(n2);
+                            if (nMem && IsMember(target)) continue;   // (groups: by their spheres' entries, above)
                             float3 cN = _BHPositionsCamRelative[n2].xyz;
                             float RN = DomainRadius(n2);
-                            if (length(cN - cT) + RN >= RT) continue;
+                            if (!SatIn(cN, RN, cT, RT)) continue;
                             float3 toN = cN - p;
                             float tcaN = dot(toN, d);
                             float ddN = dot(toN, toN);
                             if (ddN - tcaN * tcaN >= RN * RN) continue;
                             if (ddN >= RN * RN && tcaN <= 0.0) continue;
-                            float kN = max(tcaN, 0.0);
+                            // (a group's member: where the line enters its sphere, as for any group)
+                            float kN = nMem ? max(tcaN - sqrt(RN * RN - (ddN - tcaN * tcaN)), 0.0) : max(tcaN, 0.0);
                             // one the ray meets after the target's closest approach is met on the target's bent path:
                             // the target's trace stops at its distance and hands over (below) -- unless float can't
-                            // place it in the target's frame
-                            if (kN >= tKey && !IsMember(target) && RN >= 1e-4 * length(cN - cT)) continue;
+                            // place it in the target's frame. With that closest approach behind (moving away from the
+                            // target: key 0) it goes first: the "passed" pieces below took it for one the line misses
+                            // -- a weak bend, never traced (its disk gone from every ray leaving the target past it)
+                            if (tKey > 0.0 && kN >= tKey && !IsMember(target) && RN >= 1e-4 * length(cN - cT)
+                                && StrongBefore(cT - p, d, _BHParams[target].x, kN)) continue;
                             if (kN < nKey) { nKey = kN; nest = n2; }
                         }
-                        if (nest >= 0) { target = nest; tKey = nKey; }
+                        if (nest >= 0) { host0 = target; target = nest; tKey = nKey; }
                     }
                     bool tMember = (target >= 0) && IsMember(target);
-
                     float tEnd = 3.0e38;
                     if (target >= 0)
                         tEnd = tMember ? tKey : max(dot(_BHPositionsCamRelative[target].xyz - p, d), 0.0);
 
+                    // the nested one first: its host's gas on the way to it (to its middle -- its host traced on from
+                    // there after it). Also when it came first by itself (met before its host's closest approach,
+                    // nearer than that): a window in the gas around it, the camera in the disk or outside it
+                    [branch]
+                    if (host0 < 0 && target >= 0 && !hoPend)
+                    {
+                        float3 cTg = _BHPositionsCamRelative[target].xyz;
+                        float RTg = DomainRadius(target);
+                        [loop]
+                        for (int g2 = 0; g2 < count; g2++)
+                        {
+                            if (g2 == target || IsMember(g2) || _BHSpins[g2].w <= 0.5) continue;
+                            if (SatIn(cTg, RTg, _BHPositionsCamRelative[g2].xyz, DomainRadius(g2)))
+                                host0 = g2;
+                        }
+                    }
+                    [branch]
+                    if (host0 >= 0 && !hoPend && _BHSpins[host0].w > 0.5 && ((gasSt >> (uint)host0) & 1u) == 0u
+                        && (tMember ? tKey : tEnd) > 0.0)
+                    {
+                        kT0 = tMember ? tKey : tEnd;
+                        gasSt = (gasSt & ~0xF000u) | (1u << (uint)host0) | 0x100u | (tMember ? 0u : (uint)(target + 1) << 12);
+                        kHole = host0; kFromCam = firstSeg; kFinite = false;
+                        mode = 2;
+                        continue;
+                    }
+                    // (entering the group's sphere: after its host's gas on the way -- marked before, the group was
+                    // taken as passed when the ray came back from that trace, half its image cut away)
+                    if (tMember) { medGroup = GroupBits(target, count); seen |= medGroup; }
+
                     // nested holes the line passes outside their regions while the target's trace starts right here
-                    // (it would ignore them): a straight piece to the nearest one's closest approach with its whole
-                    // weak bend (as on to infinity: its pull is all near it) and the others' up to there, its jets
-                    // on that bent line; then the target's trace from there
+                    // (it would ignore them; or after a hand-off, back on its outgoing line): a straight piece to the
+                    // nearest one's closest approach with its whole weak bend (as on to infinity: its pull is all near
+                    // it) and the others' up to there, its jets on that bent line; then the target's trace from there
+                    // (its gas on the piece first, below)
                     int pass = -1;
                     float tPass = 3.0e38;
                     int pHost = hoPend ? hoHole : target;
+                    // ...and from inside the target's region on its way in too: the ones it passed got their bend at
+                    // the camera there, the gas in front of them bent by them (and a seam along the plane square to
+                    // the target, where that switched to the pieces). Not when one will be handed over (strong field
+                    // before it) or traced on this line: as before then.
+                    // (Not on its way in -- a piece from inside its region toward it, the target's weak bend over it
+                    // up to the satellite: sky directions 5-15 px off, its shadow thrown aside where the target's
+                    // closest approach and the satellite's met. Those keep the satellite's bend at the start.)
+                    bool passIn = false;
+                    bool passNo = false;
                     [branch]
-                    if (hoPend ? (target < 0) : (target >= 0 && !tMember && tEnd <= 0.0))
+                    if (hoPend ? (target < 0) : (target >= 0 && !tMember && (tEnd <= 0.0 || passIn)))
                     {
                         float3 cT = _BHPositionsCamRelative[pHost].xyz;
                         float RT = DomainRadius(pHost);
+                        float3 toTp = cT - p;
+                        float tcTp = dot(toTp, d), ddTp = dot(toTp, toTp);
+                        bool mayHandP = ((handed >> (uint)pHost) & 1u) == 0u;
                         [loop]
                         for (int n3 = 0; n3 < count; n3++)
                         {
-                            if (n3 == pHost || ((done >> (uint)n3) & 1u) != 0u || IsMember(n3)) continue;
+                            if (n3 == pHost || (((done | bendDone) >> (uint)n3) & 1u) != 0u) continue;
                             float3 cN = _BHPositionsCamRelative[n3].xyz;
-                            if (length(cN - cT) + DomainRadius(n3) >= RT) continue;
-                            float tN = max(dot(cN - p, d), 0.0);
+                            float RN3 = DomainRadius(n3);
+                            if (!SatIn(cN, RN3, cT, RT)) continue;
+                            // (only ones the line passes outside: one whose region it enters is traced)
+                            float3 toN3 = cN - p;
+                            float tcaN3 = dot(toN3, d), ddN3 = dot(toN3, toN3);
+                            if (ddN3 < RN3 * RN3 || (tcaN3 > 0.0 && ddN3 - tcaN3 * tcaN3 < RN3 * RN3))
+                            {
+                                passNo = passNo || passIn;
+                                continue;
+                            }
+                            [branch]
+                            if (passIn)
+                            {
+                                float dNT3 = length(cN - cT);
+                                // the target's field on the piece too strong for its weak bend there (as StrongBefore,
+                                // from the start): a ray going on past the target close by was thrown off by it -- its
+                                // shadow shifted and swelled on that side of the plane where the piece began
+                                float b2P = max(ddTp - tcTp * tcTp, 1e-30);
+                                float y2P = _BHParams[pHost].x * _BHParams[pHost].x / b2P;
+                                float sP = max(tcaN3, 0.0) - tcTp;
+                                float dgP = sP * rsqrt(sP * sP + b2P) + tcTp * rsqrt(tcTp * tcTp + b2P);
+                                passNo = passNo || IsMember(n3) || 10.0 * y2P * y2P * sqrt(y2P) * dgP > 1e-4
+                                      || (tcaN3 > tEnd && mayHandP && RN3 >= 1e-4 * dNT3
+                                          && (ddTp < dNT3 * dNT3 || (tcTp > 0.0 && ddTp - tcTp * tcTp < dNT3 * dNT3))
+                                          && StrongBefore(toTp, d, _BHParams[pHost].x, tcaN3));
+                            }
+                            // (a group behind -- just left: the rest of its bend, from here on, as this trace leaves it out)
+                            float tN = max(tcaN3, 0.0);
                             if (tN < tPass) { tPass = tN; pass = n3; }
                         }
+                    }
+                    if (passNo)
+                        pass = -1;
+                    // (the target's gas on the piece -- on its way in if the piece ends before its closest approach;
+                    // after a hand-off its first trace had it)
+                    [branch]
+                    if (pass >= 0 && !hoPend && tPass > 0.0 && _BHSpins[pHost].w > 0.5 && ((gasSt >> (uint)pHost) & 1u) == 0u)
+                    {
+                        kT0 = tPass;
+                        gasSt |= (1u << (uint)pHost) | 0x100u;
+                        kHole = pHost; kFromCam = firstSeg; kFinite = false;
+                        mode = 2;
+                        continue;
                     }
                     [branch]
                     if (pass >= 0)
                     {
                         float3 kP = float3(0, 0, 0), dP = float3(0, 0, 0);
+                        uint passBits = GroupBits(pass, count) & ~(done | bendDone);
                         uint gMaskP = 0u;
                         [loop]
                         for (int w2 = 0; w2 < count; w2++)
                         {
-                            if ((((done | noKick) >> (uint)w2) & 1u) != 0u) continue;
-                            if (IsMember(w2)) { gMaskP |= 1u << (uint)w2; continue; }
+                            if ((((done | noKick | passBits | bendDone) >> (uint)w2) & 1u) != 0u && w2 != pass) continue;
+                            if (IsMember(w2)) { if (w2 != pass) gMaskP |= 1u << (uint)w2; continue; }
                             float3 toW = _BHPositionsCamRelative[w2].xyz - p;
                             float tW = (w2 == pass) ? 3.0e38 : tPass;
                             float3 kw, dw;
@@ -1250,14 +1626,21 @@ Shader "Custom/BlackHoleLensingPassthrough"
                             kP += kg;
                             dP += dg;
                         }
-                        float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0), on = float3(0, 0, 0), of = float3(0, 0, 0);
-                        JetLine(p, d, jetSkip, tPass, count, 0u, mask & ~noKick & ~(1u << (uint)pass), -1, 0.0, jn, jf);
-                        JetLine(p, d, jetSkip, 3.0e30, count, 1u << (uint)pass, 1u << (uint)pass, -1, 0.0, on, of);
-                        cr.emAll += (jn + jf + on + of) * cr.T;
+                        [branch]
+                        if (IsMember(pass))
+                        {
+                            // a nested group passed: its whole bend (displacement left out, as for a hole's)
+                            float3 kg, dg;
+                            GroupWeakKick(p, d, 3.0e38, count, passBits, kg, dg);
+                            kP += kg;
+                        }
+                        JET_JOB(p, d, jetSkip, tPass, 0u, mask & ~noKick & ~passBits, -1, 0.0, cr.T);
+                        JET_JOB2(3.0e30, passBits, passBits);
                         p = p + d * tPass + dP;
                         d = ApplyKick(d, kP);
-                        done |= 1u << (uint)pass;
+                        done |= passBits;
                         jetSkip = 0.0;
+                        gasSt &= ~0xFFu;
                         continue;
                     }
                     [branch]
@@ -1267,6 +1650,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         // or the stop point itself if the line got there already (a bend after the stop acts there)
                         float tC = dot(hoP - p, d);
                         p = (tC > 0.0) ? p + d * tC : hoP;
+                        gasSt &= ~0xFFu;
                         kP0 = p;
                         kD0 = d;
                         kT0 = 0.0;
@@ -1280,28 +1664,79 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     float3 kick = float3(0, 0, 0);
                     float3 disp = float3(0, 0, 0);
                 #if BH_GROUP_WEAK
+                    // satellites nested in the (separate) target's region whose regions this line enters: traced after
+                    // it (its trace hands over), so their bend is their traces' -- not also a weak kick here, where the
+                    // line runs into their strong field (it threw rays grazing them far off)
+                    uint traceLater = 0u;
+                    // ...and those the line passes outside before the target's closest approach: all of their bend
+                    // here (on to infinity), then no more of it -- left to the hand-off, the restart line (back from
+                    // the stop, near the camera when it sits at their distance from the target) met them again: bent
+                    // twice (a ghost image beside a satellite, garbage bands along the plane square to the big one)
+                    uint wholeNow = 0u, wholeNot = 0u;
+                    [branch]
+                    if (target >= 0 && !tMember)
+                    {
+                        float3 cT2 = _BHPositionsCamRelative[target].xyz;
+                        float RT2 = DomainRadius(target);
+                        // (will the target's trace stop at their distance? as it decides below)
+                        float3 toT2 = cT2 - p;
+                        float tcT2 = dot(toT2, d), ddT2 = dot(toT2, toT2);
+                        bool mayHand = ((handed >> (uint)target) & 1u) == 0u;
+                        [loop]
+                        for (int w3 = 0; w3 < count; w3++)
+                        {
+                            if (w3 == target || (((done | seen | noKick | bendDone) >> (uint)w3) & 1u) != 0u) continue;
+                            float3 cW = _BHPositionsCamRelative[w3].xyz;
+                            float RW = DomainRadius(w3);
+                            if (!SatIn(cW, RW, cT2, RT2)) continue;
+                            float3 toW2 = cW - p;
+                            float tcW = dot(toW2, d), ddW = dot(toW2, toW2);
+                            float dWT = length(cW - cT2);
+                            // ...also those met after it when no hand-off will come (float can't place them in the
+                            // target's frame, or its leg stays outside their distance): their bend past the target's
+                            // closest approach was dropped -- a dotted line of wrong pixels along the plane square to
+                            // the target through the camera (closest approach just ahead), blocks after the rebuild
+                            bool hand = mayHand && RW >= 1e-4 * dWT
+                                     && (ddT2 < dWT * dWT || (tcT2 > 0.0 && ddT2 - tcT2 * tcT2 < dWT * dWT))
+                                     && StrongBefore(toT2, d, _BHParams[target].x, tcW);
+                            if (ddW < RW * RW || (tcW > 0.0 && ddW - tcW * tcW < RW * RW))
+                                traceLater |= GroupBits(w3, count);
+                            else if (tcW <= tEnd || !hand)
+                                wholeNow |= 1u << (uint)w3;
+                            else
+                                wholeNot |= GroupBits(w3, count);
+                        }
+                        wholeNow &= ~(traceLater | wholeNot);   // (a group: all of it, or none)
+                    }
                     uint gMask = 0u;
                     [loop]
                     for (int g = 0; g < count; g++)
-                        if (((mask >> (uint)g) & 1u) != 0u && IsMember(g)) gMask |= 1u << (uint)g;
-                    GroupWeakKick(p, d, tEnd, count, gMask, kick, disp);
+                        if (((kmask >> (uint)g) & 1u) != 0u && IsMember(g)) gMask |= 1u << (uint)g;
+                    gMask &= ~traceLater;
+                    GroupWeakKickInf(p, d, tEnd, count, gMask, wholeNow, kick, disp);
                     [loop]
                     for (int w = 0; w < count; w++)
                     {
-                        if ((((done | noKick) >> (uint)w) & 1u) != 0u || IsMember(w) || w == target) continue;
+                        if ((((done | noKick | bendDone) >> (uint)w) & 1u) != 0u || IsMember(w) || w == target) continue;
                         float3 kw, dw;
                         if (target < 0)
                         {
-                            kw = CoupledWeakKick(w, p, d, count, mask, firstSeg, touchMed);
+                            kw = CoupledWeakKick(w, p, d, count, kmask, firstSeg, touchMed);
                             dw = float3(0, 0, 0);
                         }
                         else
                         {
-                            WeakKick(d, _BHPositionsCamRelative[w].xyz - p, _BHParams[w].x, SpinJ(w), tEnd, 0.0, kw, dw);
+                            // (no mass for the ones traced after: their bend is their trace's)
+                            float rsW = (((traceLater >> (uint)w) & 1u) != 0u) ? 0.0 : _BHParams[w].x;
+                            bool whole = ((wholeNow >> (uint)w) & 1u) != 0u;
+                            float tW = whole ? 3.0e38 : tEnd;
+                            float3 toWk = _BHPositionsCamRelative[w].xyz - p;
+                            WeakKick(d, toWk, rsW, SpinJ(w) * (rsW > 0.0 ? 1.0 : 0.0), tW, 0.0, kw, dw);
+                            if (whole) dw = WeakDisp(d, toWk, rsW, tEnd);
                             // from the camera: its finite distance, as the straight view past it has it (the rays just
                             // inside its region, traced exactly from the camera, have it too: a ~4 px seam at its edge)
                             if (firstSeg)
-                                kw += NearCameraTermTo(d, _BHPositionsCamRelative[w].xyz - p, _BHParams[w].x, tEnd, w);
+                                kw += NearCameraTermTo(d, toWk, rsW, tW, w);
                         }
                         kick += kw;
                         disp += dw;
@@ -1327,6 +1762,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     }
                 #endif
                     fromMedium = false;
+                    gasSt &= ~0xFFu;
                     // jets on this straight piece (into a group: along the chord to where the combined-field
                     // leg starts). A separate hole's exact trace re-traces its piece: it does them there.
                     [branch]
@@ -1340,9 +1776,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                             jLen = length(chordM);
                             jDir = chordM / max(jLen, 1e-30);
                         }
-                        float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
-                        JetLine(p, jDir, jetSkip, jLen, count, tMember ? 0u : mask, mask, -1, 0.0, jn, jf);
-                        cr.emAll += (jn + jf) * cr.T;
+                        JET_JOB(p, jDir, jetSkip, jLen, tMember ? 0u : mask, mask, -1, 0.0, cr.T);
                         jetSkip = 0.0;
                     }
                     float3 newDir = ApplyKick(d, kick);
@@ -1350,7 +1784,8 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     {
                         d = newDir;
                         reachedInfinity = true;
-                        break;
+                        fin = true;
+                        continue;
                     }
                     float3 pEnd = p + d * tEnd + disp;
                     if (tMember)
@@ -1372,6 +1807,9 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     }
                     else
                     {
+                    #if BH_GROUP_WEAK
+                        bendDone |= wholeNow;
+                    #endif
                         kP0 = p;
                         kD0 = d;
                         kT0 = tEnd;
@@ -1388,18 +1826,49 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 else if (mode == 1)
                 {
                     cr.anyStrong = true;
-                    cr.traces++;
-                    cr.path |= 1;
-                    g_dbgTraces += 1.0;
+                    if (!medOn)
+                    {
+                        cr.traces++;
+                        cr.path |= 1;
+                        g_dbgTraces += 1.0;
+                        medS = 0;
+                    }
+                    medOn = false;
                     int hit;
-                    int res = IntegrateMedium(p, d, count, mask, hit, cr, anyEm);
-                    if (res == 2) { cr.captured = true; cr.why = BH_WHY_PHOTONSPH; break; }
-                    if (res == 3) { cr.captured = true; cr.why = BH_WHY_STEPS; break; }
-                    if (res == 4) { stopped = true; break; }
+                    float3 jA;
+                    int res = IntegrateMedium(p, d, count, mask, hit, medS, jA);
+                #if defined(BH_JETS)
+                    // its secant's jets: at the next top (then on along it, the same leg: res 5)
+                    float3 chJ = p - jA;
+                    float clJ = length(chJ);
+                    [branch]
+                    if (clJ > 0.0)
+                        JET_JOB(jA, chJ / clJ, 0.0, clJ, 0u, mask, -1, 0.0, cr.T);
+                    if (res == 5)
+                    {
+                        medOn = true;
+                        ev--;     // (not an event)
+                        continue;
+                    }
+                #endif
+                    if (res == 2) { cr.captured = true; cr.why = BH_WHY_PHOTONSPH; fin = true; continue; }
+                    if (res == 3) { cr.captured = true; cr.why = BH_WHY_STEPS; fin = true; continue; }
                     if (res == 0)
                     {
                         mode = 0;
                         fromMedium = true;
+                        // out of a nested group: the rest of its bend at once, then no more of it -- the big
+                        // one's trace, often starting right here, leaves it out: cut where that trace's closest
+                        // approach went from ahead (bend up to there only) to behind (all of it), a line ~1 px off
+                        uint gOut = medGroup & ~(done | bendDone);
+                        [branch]
+                        if (gOut != 0u && GroupNested(gOut, count))
+                        {
+                            float3 kg, dg;
+                            GroupWeakKick(p, d, 3.0e38, count, gOut, kg, dg);
+                            d = ApplyKick(d, kg);
+                            bendDone |= gOut;
+                        }
                     }
                     else
                     {
@@ -1417,6 +1886,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 {
                     if (kerrCount >= BH_MAX_KERR) { cr.captured = true; cr.why = BH_WHY_KERR; break; }
                     int h = kHole;
+                    bool kGas = (gasSt & 0x100u) != 0u;
                     float rs = _BHParams[h].x;
                     float3 bhPos = _BHPositionsCamRelative[h].xyz;
                     float3 toBH = bhPos - p;
@@ -1443,7 +1913,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     // hole and ray; only satellites float can place in this hole's frame (region > 1e-4 distance).
                     bool tryHand = false;
                     [branch]
-                    if (!kFinite && ((handed >> (uint)h) & 1u) == 0u)
+                    if (!kFinite && !kGas && ((handed >> (uint)h) & 1u) == 0u)
                     {
                         float RH = DomainRadius(h);
                         float tcaH = dot(toBH, d);
@@ -1452,11 +1922,22 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         [loop]
                         for (int s3 = 0; s3 < count; s3++)
                         {
-                            if (s3 == h || ((done >> (uint)s3) & 1u) != 0u || IsMember(s3)) continue;
-                            float dSH = length(_BHPositionsCamRelative[s3].xyz - bhPos);
+                            if (s3 == h || (((done | seen | bendDone) >> (uint)s3) & 1u) != 0u) continue;
+                            float3 cS = _BHPositionsCamRelative[s3].xyz;
+                            float dSH = length(cS - bhPos);
                             float RS = DomainRadius(s3);
-                            if (dSH + RS >= RH || RS < 1e-4 * dSH) continue;
-                            if (dd2 < dSH * dSH || (tcaH > 0.0 && b2H < dSH * dSH))
+                            if (!SatIn(cS, RS, bhPos, RH) || RS < 1e-4 * dSH) continue;
+                            // the leg dips inside the satellite's distance (stops where it comes back out to it), or
+                            // its line runs through the satellite's region without doing so: starting out beyond that
+                            // distance and moving away from the hole, or passing the hole farther out (the satellite's
+                            // far side). Those stop at once (rOuter below the start) and the satellite goes first --
+                            // they skipped it: half its disk (all of it, and its lensing, with the camera beside it
+                            // on the far side) was missing, cut along the sphere through it around the hole.
+                            float3 toS = cS - p;
+                            float tcaS = dot(toS, d);
+                            float ddS = dot(toS, toS);
+                            bool throughS = (ddS < RS * RS) || (tcaS > 0.0 && ddS - tcaS * tcaS < RS * RS);
+                            if (dd2 < dSH * dSH || (tcaH > 0.0 && b2H < dSH * dSH) || throughS)
                             {
                                 rOuter = min(rOuter, dSH / rs);
                                 tryHand = true;
@@ -1465,8 +1946,9 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         if (tryHand)
                             escR = rOuter;
                     }
-                    g_orderBase = (h == hoHole) ? hoBase : 0.0;
-                    noKick &= ~(1u << (uint)h);
+                    g_orderBase = (h == hoHole && !kGas) ? hoBase : 0.0;
+                    if (!kGas)
+                        noKick &= ~(1u << (uint)h);
 
                     // jets: a group's trace samples its hole's along the whole geodesic; a separate hole's
                     // trace inside min(JET_RGEO, its region), faded into the straight lines here: this one up to
@@ -1475,30 +1957,53 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     float3 pBack = p;
                     float tPre = cr.T;
                     g_jetFootRs = g_jetPix * length(bhPos) / rs;
+                    // aimed at the centre (JetOnLine): its own jet on the straight line, unfaded, up to the
+                    // horizon (it falls in), and none along its trace
+                    float3 jOff = bhPos - (kFinite ? kEntry : kP0);
+                    float3 jDir = kFinite ? d : kD0;
+                    float tcaJ = dot(jOff, jDir);
+                    float m2J = max(dot(jOff, jOff) - tcaJ * tcaJ, 0.0);
+                    bool onLine = (tcaJ > 0.0) && JetOnLine(sqrt(m2J), rs, _BHSpins[h].x);
+                    float rHJ = (0.5 + sqrt(max(0.25 - 0.25 * _BHSpins[h].x * _BHSpins[h].x, 0.0))) * rs;
+                    float tHJ = max(tcaJ - sqrt(max(rHJ * rHJ - m2J, 0.0)), 0.0);
+                #if defined(BH_JETS)
                     [branch]
-                    if (!kFinite)
+                    if (!kFinite && !kGas && !jPre)
                     {
                         // the jets up to the closest approach, on the leg's path bent through every hole left
                         // (displaced points: exactly what the straight view outside the region draws, from the
-                        // same start); its own jet faded in where its trace samples it
-                        float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
-                        JetLine(kP0, kD0, jetSkip, kT0, count, mask, mask & ~noKick, h, rGw, jn, jf);
-                        cr.emAll += (jn + jf) * cr.T;
+                        // same start); its own jet faded in where its trace samples it -- made at the next top
+                        JET_JOB(kP0, kD0, jetSkip, kT0, mask, mask & ~noKick, onLine ? -1 : h, onLine ? 0.0 : rGw, cr.T);
+                        jPre = true;
+                        ev--;     // (not an event)
+                        continue;
                     }
+                    jPre = false;
+                #endif
 
                     float3 color, exitPos, exitDir; bool escaped; float trans;
                     bool hf; float4 fc; float fi; float3 ef;
                     g_dbgTraces += 1.0;
+                    // a gas-only trace: up to the Mino time of the piece's end on the straight line (dlambda = ds / r^2)
+                    // -- smooth across its closest approach, where a stop radius switched legs (the bent path dips)
+                    [branch]
+                    if (kGas)
+                    {
+                        float tcS = dot(toBH, d) / rs;
+                        float bS = max(sqrt(max(dot(toBH, toBH) / (rs * rs) - tcS * tcS, 0.0)), 1e-3);
+                        g_lamStop = max((atan((kT0 / rs - tcS) / bS) + atan(tcS / bS)) / bS, 1e-9);
+                    }
                     KerrTraceCore(
                         dT, toBH, rs,
                         _BHParams[h].y, _BHParams[h].z, escR,
                         _BHDiskNormals[h].xyz,
                         _BHSpins[h].x, _BHSpins[h].y,
-                        _BHNoise, sampler_BHNoise,
+                        _BHNoise, sampler_trilinear_repeat,
                         _BHRotationOffsets[h].x, _BHRotationOffsets[h].yz,
                         rOuter, true, _BHSpins[h].w > 0.5,
                         color, exitPos, exitDir, _BHAppearanceProperties1[h], _BHAppearanceProperties2[h],
-                        escaped, trans, hf, fc, fi, ef, h, kFinite ? rOuter : min(JET_RGEO, _BHParams[h].w));
+                        escaped, trans, hf, fc, fi, ef, h, (onLine || kGas) ? 0.0 : (kFinite ? rOuter : min(JET_RGEO, _BHParams[h].w)));
+                    g_lamStop = 0.0;
 
                     cr.path |= kFinite ? 2 : 4;
                     if (cr.firstHole < 0)
@@ -1514,9 +2019,14 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     // a volumetric disk reports no first crossing: any absorbing trace counts
                     anyEm = anyEm || hf || (trans < 0.999);
                     kerrCount++;
-                    cr.traces++;
                     cr.emAll += color * cr.T;
                     cr.T *= trans;
+                    // (a gas-only trace counts only where the ray ends in it: the same class as the hole's trace it
+                    // stands for -- where the gas went opaque before or after the piece's end, the class changed, a
+                    // line of full-res pixels along that contour, sharper than the rebuilt ones around it)
+                    if (!kGas || cr.T < 0.01)
+                        cr.traces++;
+
                     // a group's trace: the jets inside its sphere on the chord through it -- the other holes',
                     // and its own faded in where its trace fades out (rOuter / 2 .. rOuter)
                     [branch]
@@ -1529,15 +2039,15 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         float chl = length(ch);
                         [branch]
                         if (chl > 0.0)
-                        {
-                            float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
-                            JetLine(kEntry, ch / chl, 0.0, chl, count, 0u, allMask & ~done, h, InnerRadius(h), jn, jf);
-                            cr.emAll += (jn + jf) * tPre;
-                        }
+                            JET_JOB(kEntry, ch / chl, 0.0, onLine ? min(chl, tHJ) : chl, 0u, allMask & ~done,
+                                    onLine ? -1 : h, onLine ? 0.0 : InnerRadius(h), tPre);
                     }
                     cr.anyStrong = true;
-                    if (!escaped) { cr.captured = true; cr.why = BH_WHY_HORIZON; break; }
-                    if (cr.T < 0.01) { stopped = true; break; }
+                    // (an opaque disk stops the ray without a capture: see BH_SINGLE)
+                    // (a gas-only trace's end is not the ray's: only its gas can stop it)
+                    // (ending here: the group trace's chord jets above, at the next top)
+                    if (!escaped && trans >= 0.01 && !kGas) { cr.captured = true; cr.why = BH_WHY_HORIZON; fin = true; continue; }
+                    if ((!escaped && !kGas) || cr.T < 0.01) { stopped = true; fin = true; continue; }
 
                     float3 fromHole = exitPos - toBH;
                     if (kFinite)
@@ -1546,7 +2056,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         float3 pOut = bhPos + fromHole * (BLToIso(rE) / max(rE, 1e-6));
                         float3 dOut = ZamoToStatic(exitDir, ZamoVelocity(h, pOut));
                         float L = length(pOut - kEntry);
-                        float3 f = ExternalGrad(h, count, mask);
+                        float3 f = ExternalGrad(h, count, kmask);
                         f -= dot(f, dOut) * dOut;
                         pOut += (0.5 * L * L) * f;
                         dOut = ApplyKick(dOut, L * f);
@@ -1568,13 +2078,31 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         // there (the satellite next, then this hole again, from that point)
                         float3 pH = bhPos + fromHole;
                         float tH = max(dot(pH - kP0, kD0), kT0);
-                        float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
-                        JetLine(kP0, kD0, max(kT0, jetSkip), tH, count, mask, 1u << (uint)h, h, rGw, jn, jf);
-                        cr.emAll += (jn + jf) * cr.T;
+                        JET_JOB(kP0, kD0, max(kT0, jetSkip), tH, mask, 1u << (uint)h, h, rGw, cr.T);
                         // the satellite's encounter is on both sides of its distance: the next pieces start on this
                         // outgoing line back at its point nearest the hole (the satellite's bend from there, or its
                         // trace from there), their jets from the stop on, and no weak bend of this hole on them
                         float tB = min(dot(bhPos - pH, exitDir), 0.0);
+                        float tB0 = tB;
+                        // ...and back before the regions of the satellites nested in it that this line runs through (a
+                        // leg grazing their distance stops at its closest approach -- inside the satellite's region when
+                        // that is where it passes: its trace from there lost the near half of it, a dark line across it)
+                        // -- there, around that point: not where the line, run back past it, crosses the incoming side
+                        // (a group the ray had passed near the camera, integrated again from there: a band of garbage)
+                        float RH4 = DomainRadius(h);
+                        [loop]
+                        for (int s4 = 0; s4 < count; s4++)
+                        {
+                            if (s4 == h || (((done | seen | bendDone) >> (uint)s4) & 1u) != 0u) continue;
+                            float3 toS4 = _BHPositionsCamRelative[s4].xyz - pH;
+                            float RS4 = DomainRadius(s4);
+                            if (!SatIn(_BHPositionsCamRelative[s4].xyz, RS4, bhPos, RH4)) continue;
+                            float tc4 = dot(toS4, exitDir);
+                            float b24 = dot(toS4, toS4) - tc4 * tc4;
+                            float tE4 = tc4 - sqrt(max(RS4 * RS4 - b24, 0.0));
+                            if (b24 < RS4 * RS4 && tE4 >= tB0 - 2.0 * RS4)
+                                tB = min(tB, tE4 - 1e-3 * RS4);
+                        }
                         if (dot(toBH, dT) <= 0.0)
                             tB = max(tB, dot(pBack - pH, exitDir));   // started outgoing (a camera inside): from there
                         p = pH + exitDir * tB;
@@ -1587,18 +2115,31 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         mode = 0;
                         jetSkip = -tB;
                     }
+                    else if (kGas)
+                    {
+                        // gas only: the piece it went along comes next, from where it was
+                        gasSt &= ~0x100u;
+                        mode = 0;
+                    }
                     else
                     {
                         // its own jet beyond the closest approach on the same path, behind the disk (later pieces
                         // leave it out: done); the others' from the asymptote on
-                        float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
-                        JetLine(kP0, kD0, max(kT0, jetSkip), 3.0e30, count, mask, 1u << (uint)h, h, rGw, jn, jf);
-                        cr.emAll += (jn + jf) * cr.T;
+                        JET_JOB(kP0, kD0, max(kT0, jetSkip), 3.0e30, mask, 1u << (uint)h, h, rGw, cr.T);
                         p = bhPos + fromHole;
                         d = exitDir;
                         done |= (1u << (uint)h);
                         mode = 0;
                         jetSkip = max(dot(pBack - p, d), 0.0);
+                        // its host's gas taken up to its middle: the host's trace on from there (on its way out)
+                        [branch]
+                        if ((int)((gasSt >> 12) & 0xFu) == h + 1)
+                        {
+                            float tBk = min(dot(bhPos - p, d), 0.0);
+                            p += d * tBk;
+                            jetSkip -= tBk;
+                            gasSt &= ~0xF000u;
+                        }
                     }
                 }
             }
@@ -1611,13 +2152,17 @@ Shader "Custom/BlackHoleLensingPassthrough"
         }
     #endif
 
+        // The reconstruction class (compared for equality) + 0.5 if the texel has a first visible crossing to
+        // re-shade. That flag is not part of the class: a cell can mix texels with and without one -- the disk's
+        // faded outer edge, where it ends in a smooth fade-out, split the classes all around the disk (most of
+        // pass 2 for the sheet disk). Abrupt edges still fail the transmittance test.
         float ChainClass(ChainResult cr)
         {
             return (cr.captured ? 1.0 : 0.0)
-                 + (cr.hasFirst ? 2.0 : 0.0)
                  + 4.0 * min(cr.firstIdx, 7.0)
                  + 32.0 * (float) min(cr.traces, 15)
-                 + 512.0 * (float) (cr.firstHole + 1);
+                 + 512.0 * (float) (cr.firstHole + 1)
+                 + (cr.hasFirst ? 0.5 : 0.0);
         }
 
         // first visible emission, re-shaded at this pixel
@@ -1630,7 +2175,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float trans = 1.0;
             float gDummy = 0.0;
             ShadeKerrDiskCrossing(fc.x, fc.y, fc.z, (int) idx, aPhys, _BHSpins[h].y, diskOut, hd,
-                _BHNoise, sampler_BHNoise, _BHRotationOffsets[h].x, _BHRotationOffsets[h].yz,
+                _BHNoise, sampler_trilinear_repeat, _BHRotationOffsets[h].x, _BHRotationOffsets[h].yz,
                 KERR_DISK_PLUNGING != 0, fc.w, _BHAppearanceProperties1[h], _BHAppearanceProperties2[h], lod,
                 acc, trans, gDummy);
             opacity = 1.0 - trans;
@@ -1648,11 +2193,71 @@ Shader "Custom/BlackHoleLensingPassthrough"
         float WrapPi(float x) { return x - TWO_PI * round(x * (1.0 / TWO_PI)); }
 
 
+        // Is the scene nearer than every region (the near side of its sphere) at this reduced-res texel and a block
+        // around it -- 3 x 3 depth taps over the cells that read it? (Distances along the texel's own ray: the taps'
+        // differ by a block's angle, covered by the 2 % margin.)
+        bool LowTexelHidden(float2 texcoord, float3 dir, int count)
+        {
+            float tNear = 3.0e38;
+            [loop]
+            for (int j = 0; j < count; j++)
+                tNear = min(tNear, length(_BHPositionsCamRelative[j].xyz) - DomainRadius(j));
+            float eMax = 0.98 * tNear * max(dot(dir, -UNITY_MATRIX_V[2].xyz), 0.0);   // eye depth bound
+            [branch]
+            if (eMax <= 0.0)
+                return false;
+            float2 uv0 = LowTexelUV(texcoord);
+            [unroll]
+            for (int y = -1; y <= 1; y++)
+            {
+                [unroll]
+                for (int x = -1; x <= 1; x++)
+                {
+                    if (SceneEyeDepth(saturate(uv0 + float2(x, y) * _BHTraceGrid.xy)) >= eMax)
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        // The jets on a weak-field pixel, rebuilt from the reduced-res trace: its weak-field texels integrated them
+        // along the same straight line, blurred to the texel's footprint (g_jetPix), so bilinear interpolation
+        // rebuilds them -- 1 / ds^2 of the work of integrating them per pixel. A cell across a region's edge has
+        // texels inside it too: traces that escaped with no disk on the way (T = 1, no capture, no first crossing:
+        // light = the jets, the region's edge is far out of the gas) -- what the pixels inside take as well. False
+        // when a texel is anything else: the caller leaves those to the full-res trace. (Before, the whole region's
+        // edge went to it wherever a jet's glow was near: a ring of full-res traces around the region.)
+        bool TexelJetsOnly(float c, float T)
+        {
+            float k = floor(c);
+            bool weak = abs(c - k - BH_WEAK_TAG) < 0.01;
+            bool clear = (k >= 32.0) && (fmod(k, 2.0) < 1.0) && (c - k < 0.25) && (T >= 0.999);
+            return weak || clear;
+        }
+        bool WeakJets(float2 uv, out float3 em)
+        {
+            em = 0;
+            float2 p = uv * _BHTraceGrid.zw;
+            int2 i0 = (int2) floor(p);
+            float2 f = p - (float2) i0;
+            int2 mx = (int2) _BHLowSize.xy - 1;
+            int2 c00 = clamp(i0, 0, mx), c10 = clamp(i0 + int2(1, 0), 0, mx);
+            int2 c01 = clamp(i0 + int2(0, 1), 0, mx), c11 = clamp(i0 + int2(1, 1), 0, mx);
+            float4 cw = float4(_BHLow1.Load(int3(c00, 0)).w, _BHLow1.Load(int3(c10, 0)).w,
+                               _BHLow1.Load(int3(c01, 0)).w, _BHLow1.Load(int3(c11, 0)).w);
+            float4 a00 = _BHLow0.Load(int3(c00, 0)), a10 = _BHLow0.Load(int3(c10, 0));
+            float4 a01 = _BHLow0.Load(int3(c01, 0)), a11 = _BHLow0.Load(int3(c11, 0));
+            if (!(TexelJetsOnly(cw.x, a00.a) && TexelJetsOnly(cw.y, a10.a) && TexelJetsOnly(cw.z, a01.a) && TexelJetsOnly(cw.w, a11.a)))
+                return false;
+            em = lerp(lerp(a00.rgb, a10.rgb, f.x), lerp(a01.rgb, a11.rgb, f.x), f.y);
+            return true;
+        }
+
         bool Reconstruct(float2 uv, out float3 color)
         {
             color = 0;
             g_reconFail = 0;
-            float2 p = uv * _BHLowSize.xy - 0.5;
+            float2 p = uv * _BHTraceGrid.zw;   // (texel i at block corner i: see _BHTraceGrid)
             int2 i0 = (int2) floor(p);
             float2 f = p - (float2) i0;
             int2 mx = (int2) _BHLowSize.xy - 1;
@@ -1666,11 +2271,14 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float4 b01 = _BHLow1.Load(int3(c01, 0));
             float4 b11 = _BHLow1.Load(int3(c11, 0));
 
-            if (b00.w != b10.w || b00.w != b01.w || b00.w != b11.w) { g_reconFail = 1; return false; }
-            float cls = b00.w;
+            float4 cw = float4(b00.w, b10.w, b01.w, b11.w);
+            float4 ck = floor(cw);
+            if (ck.x != ck.y || ck.x != ck.z || ck.x != ck.w) { g_reconFail = 1; return false; }
+            float cls = ck.x;
             if (cls < 32.0) { g_reconFail = 2; return false; }
+            float4 hv = step(0.25, cw - ck);   // per texel: has a first crossing to re-shade (ChainClass)
             bool captured = (fmod(cls, 2.0) >= 1.0);
-            bool hasFirst = (fmod(floor(cls / 2.0), 2.0) >= 1.0);
+            bool hasFirst = any(hv > 0.0);
             float firstIdx = fmod(floor(cls / 4.0), 8.0);
             int firstHole = (int) floor(cls / 512.0) - 1;
 
@@ -1682,6 +2290,14 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float tMax = max(max(a00.a, a10.a), max(a01.a, a11.a));
             if (tMax - tMin > BH_UPS_MAX_DT) { g_reconFail = 3; return false; }
 
+            // Emission bilinear interpolation cannot rebuild: a feature thinner than the cell (the photon ring's
+            // higher-order images, a hot spot's core) caught by one texel and not its neighbours was spread into
+            // a bright ds x ds block. Compared on the compressed scale the tonemapper shows, L / (L + knee).
+            float4 eL = float4(dot(a00.rgb, BH_LUMA), dot(a10.rgb, BH_LUMA), dot(a01.rgb, BH_LUMA), dot(a11.rgb, BH_LUMA));
+            float4 eQ = eL / (eL + BH_UPS_EM_KNEE);
+            if (max(max(eQ.x, eQ.y), max(eQ.z, eQ.w)) - min(min(eQ.x, eQ.y), min(eQ.z, eQ.w)) > BH_UPS_MAX_DEM)
+            { g_reconFail = 8; return false; }
+
             // Sky hidden behind opaque emission in all four texels: its direction never
             // reaches the screen, so it must not decide whether this cell is rebuilt.
             bool skyVisible = !captured && tMax >= 0.01;
@@ -1690,23 +2306,36 @@ Shader "Custom/BlackHoleLensingPassthrough"
             float skyFoot = 0.0;
             if (skyVisible)
             {
+                // Only texels that see sky (T >= 0.01) have a direction that matters: behind an opaque disk
+                // the trace stops (no exit direction). Their sky is weighted by T, so the direction is
+                // interpolated T-weighted and the spread / twist tests only compare texels that see it.
+                float4 v = step(0.01, float4(a00.a, a10.a, a01.a, a11.a));
                 float texelAngle = 2.0 / (UNITY_MATRIX_P[1][1] * _BHLowSize.y);
-                float cosMax = cos(BH_UPS_MAX_SPREAD * texelAngle);
-                float dMin = min(min(dot(b00.xyz, b10.xyz), dot(b00.xyz, b01.xyz)),
-                                 min(dot(b11.xyz, b10.xyz), dot(b11.xyz, b01.xyz)));
+                float cosMax = (tMax < BH_UPS_SKY_T) ? -2.0 : cos(BH_UPS_MAX_SPREAD * texelAngle);
+                float dMin = 1.0;
+                if (v.x * v.y > 0.0) dMin = min(dMin, dot(b00.xyz, b10.xyz));
+                if (v.x * v.z > 0.0) dMin = min(dMin, dot(b00.xyz, b01.xyz));
+                if (v.w * v.y > 0.0) dMin = min(dMin, dot(b11.xyz, b10.xyz));
+                if (v.w * v.z > 0.0) dMin = min(dMin, dot(b11.xyz, b01.xyz));
                 if (dMin < cosMax) { g_reconFail = 4; return false; }
 
                 float pixAngle = 2.0 / (UNITY_MATRIX_P[1][1] * _ScreenParams.y);
-                float l1 = length(b10.xyz - b00.xyz);
-                float l2 = length(b01.xyz - b00.xyz);
-                float perPixMin = min(l1, l2) / _BHDownsample;
-                float perPixMax = max(l1, l2) / _BHDownsample;
-                float3 twist = (b00.xyz + b11.xyz) - (b10.xyz + b01.xyz);
-                float twistMax = BH_UPS_MAX_TWIST * perPixMin;
-                if (dot(twist, twist) > twistMax * twistMax) { g_reconFail = 5; return false; }
+                // per-pixel footprint from the edges of the cell that see sky (x: 00-10 / 01-11, y: 00-01 / 10-11)
+                float lx = max(v.x * v.y * length(b10.xyz - b00.xyz), v.z * v.w * length(b11.xyz - b01.xyz));
+                float ly = max(v.x * v.z * length(b01.xyz - b00.xyz), v.y * v.w * length(b11.xyz - b10.xyz));
+                bool allSky = all(v > 0.0);
+                if (allSky && tMax >= BH_UPS_SKY_T)
+                {
+                    float perPixMin = min(length(b10.xyz - b00.xyz), length(b01.xyz - b00.xyz)) / _BHDownsample;
+                    float3 twist = (b00.xyz + b11.xyz) - (b10.xyz + b01.xyz);
+                    float twistMax = BH_UPS_MAX_TWIST * perPixMin;
+                    if (dot(twist, twist) > twistMax * twistMax) { g_reconFail = 5; return false; }
+                }
 
-                dir = normalize(lerp(lerp(b00.xyz, b10.xyz, f.x), lerp(b01.xyz, b11.xyz, f.x), f.y));
-                skyFoot = max(perPixMax, pixAngle);
+                float4 wT = float4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y)
+                          * float4(a00.a, a10.a, a01.a, a11.a) * v;
+                dir = normalize(wT.x * b00.xyz + wT.y * b10.xyz + wT.z * b01.xyz + wT.w * b11.xyz + 1e-20);
+                skyFoot = max(max(lx, ly) / _BHDownsample, pixAngle);
             }
 
             float3 emFirst = 0;
@@ -1716,6 +2345,13 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 float4 d10 = _BHLow2.Load(int3(c10, 0));
                 float4 d01 = _BHLow2.Load(int3(c01, 0));
                 float4 d11 = _BHLow2.Load(int3(c11, 0));
+                // texels without a crossing (their faint emission is in a.rgb) take the crossing of one that
+                // has it for the tests and the gradients, and get no weight in the interpolation
+                float4 dRef = (hv.x > 0.0) ? d00 : ((hv.y > 0.0) ? d10 : ((hv.z > 0.0) ? d01 : d11));
+                d00 = (hv.x > 0.0) ? d00 : dRef;
+                d10 = (hv.y > 0.0) ? d10 : dRef;
+                d01 = (hv.z > 0.0) ? d01 : dRef;
+                d11 = (hv.w > 0.0) ? d11 : dRef;
                 float rMin = min(min(d00.x, d10.x), min(d01.x, d11.x));
                 float rMax = max(max(d00.x, d10.x), max(d01.x, d11.x));
                 if (rMax - rMin > BH_UPS_MAX_DR * rMin) { g_reconFail = 6; return false; }
@@ -1725,14 +2361,17 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 float phMin = min(min(d00.y, d10.y), min(d01.y, d11.y));
                 float phMax = max(max(d00.y, d10.y), max(d01.y, d11.y));
                 if (phMax - phMin > BH_UPS_MAX_DPHI) { g_reconFail = 7; return false; }
-                float4 fc = lerp(lerp(d00, d10, f.x), lerp(d01, d11, f.x), f.y);
+                float4 wF = float4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y) * hv;
+                float wSum = wF.x + wF.y + wF.z + wF.w;   // > 0: hasFirst
+                float4 fc = (wF.x * d00 + wF.y * d10 + wF.z * d01 + wF.w * d11) / max(wSum, 1e-6);
 
                 float2 gR = float2(0.5 * ((d10.x - d00.x) + (d11.x - d01.x)),
                                    0.5 * ((d01.x - d00.x) + (d11.x - d10.x)));
                 float2 gP = float2(0.5 * ((d10.y - d00.y) + (d11.y - d01.y)),
                                    0.5 * ((d01.y - d00.y) + (d11.y - d10.y)));
-                float su = (4.0 / TWO_PI) * _BHNoiseSize.x / _BHDownsample;
-                float sv = 0.2 * _BHNoiseSize.y / _BHDownsample;
+                // (texture units per radian round the disk, and per unit radius: DiskTexUV, log-polar)
+                float su = (DISK_TEX_TILES2 / TWO_PI) * _BHNoiseSize.x / _BHDownsample;
+                float sv = (DISK_TEX_TILES2 / TWO_PI) / (fc.x + DISK_TEX_RCORE * LoadHoleDisk(firstHole).rIsco) * _BHNoiseSize.y / _BHDownsample;
                 float2 tx = float2(gP.x * su, gR.x * sv);
                 float2 ty = float2(gP.y * su, gR.y * sv);
                 float lod = max(0.5 * log2(max(max(dot(tx, tx), dot(ty, ty)), 1e-12)), 0.0);
@@ -1740,7 +2379,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 float op;
             #if !defined(BH_VOLUMETRIC_DISK)
                 // (volumes are not a point: they report no first crossing, all their emission is in a.rgb)
-                emFirst = ShadeFirstCrossing(firstHole, fc, firstIdx, lod, op);
+                emFirst = ShadeFirstCrossing(firstHole, fc, firstIdx, lod, op) * wSum;
             #endif
             }
 
@@ -1774,6 +2413,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
             #pragma fragment FragComposite
             #pragma use_dxc
             #pragma multi_compile_fragment _ BH_VOLUMETRIC_DISK
+            #pragma multi_compile_fragment _ BH_JETS
 
             float4 FragComposite (Varyings input) : SV_Target
             {
@@ -1822,12 +2462,24 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 }
                 float tFirst = FirstDomainEntry(dir, count, camHole);
 
-                if (!isSkyPixel && sceneEye / max(dot(dir, camFwd0), 1e-4) < tFirst)
+                float sceneDist = sceneEye / max(dot(dir, camFwd0), 1e-4);
+                if (!isSkyPixel && sceneDist < tFirst)
                 {
                 #if BH_DEBUG_COST
                     return float4(0, 0, 0, 1);
                 #endif
-                    return float4(sceneColor, 1);
+                    float3 sc = sceneColor;
+                #if defined(BH_JETS)
+                    // outside every region: the jets in front of it (a planet far behind a jet cut it out). Their
+                    // light from the reduced-res weak-field texels, where the jet nearest the ray crosses it before
+                    // the scene does; where those are missing (a cell across a region's edge) nothing is added.
+                    float3 jetEm;
+                    [branch]
+                    if (tFirst > 1e30 && _BHDownsample > 1.5 && JetCrossingBefore(dir, sceneDist, count)
+                        && WeakJets(input.texcoord, jetEm))
+                        sc += ObserverShift(jetEm);
+                #endif
+                    return float4(sc, 1);
                 }
 
                 // sky with no visible bending (the scene as it is), or weak field only
@@ -1837,15 +2489,27 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 #if BH_DEBUG_COST
                     return skyOnly ? float4(0, 0, 0, 1) : float4(0, 0, 0.6, 1);
                 #endif
+                    // (only sky pixels get here: in front of the scene the early-out above took them)
                     float3 bg = sceneColor;
                     [branch]
                     if (!skyOnly)
                         bg = SampleSky(WeakOnlyDir(dir, count), pixAngle);
-                    // jets on the straight line (in front of the scene up to its depth)
-                    float3 jn = float3(0, 0, 0), jf = float3(0, 0, 0);
-                    JetLine(float3(0, 0, 0), dir, 0.0, isSkyPixel ? 3.0e30 : sceneEye / max(dot(dir, camFwd0), 1e-4),
-                            count, (1u << (uint)count) - 1u, (1u << (uint)count) - 1u, -1, 0.0, jn, jf);
-                    bg += jn + jf;
+                #if defined(BH_JETS)
+                    // The jets: from the reduced-res trace's weak-field texels (WeakJets). Where it has none (no
+                    // reduced-res pass, or a cell across a region's edge) and a jet is near: left to pass 2, whose
+                    // trace takes this same straight-line path with the jets on it. (Integrating them here made
+                    // this pass -- every pixel of the screen -- carry the jet code's registers.)
+                    float3 jetEm = float3(0, 0, 0);
+                    bool haveJets = (_BHDownsample > 1.5) && WeakJets(input.texcoord, jetEm);
+                    uint allM = (1u << (uint)count) - 1u;
+                    [branch]
+                    if (!haveJets && JetNearAny(float3(0, 0, 0), dir, 0.0, 3.0e30, count, allM, allM))
+                    {
+                        discard;
+                        return float4(0, 0, 0, 1);
+                    }
+                    bg += jetEm;
+                #endif
                     float3 outC = ObserverShift(bg);
                 #if BH_DEBUG_PATH
                     outC = DebugPathTint(0, outC);
@@ -1893,6 +2557,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
             #pragma use_dxc
             #pragma multi_compile_fragment _ BH_SINGLE
             #pragma multi_compile_fragment _ BH_VOLUMETRIC_DISK
+            #pragma multi_compile_fragment _ BH_JETS
 
             struct LowOut
             {
@@ -1910,20 +2575,36 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 o.t2 = float4(0, 0, 0, 0);
                 if (_BHCount == 0) return o;
 
-                float3 dir = PixelRayDir(input.texcoord);
+                float3 dir = PixelRayDir(LowTexelUV(input.texcoord));
                 int count = min(_BHCount, 8);
                 int camHole = CameraHole(count);
                 bool weakOnly = FirstDomainEntry(dir, count, camHole) > 1e30;
+                // behind the scene here and all around (a planet in front of the hole): nothing of it is seen. Left
+                // untraced (class 0): a cell with it rebuilds no pixel, the visible ones of it get the full-res trace.
+                [branch]
+                if (!weakOnly && camHole < 0 && LowTexelHidden(input.texcoord, dir, count))
+                    return o;
+                [branch]
                 if (weakOnly)
                 {
+                    // Weak-field texels are read by the cells of pixels just inside a region (BH_SINGLE: those
+                    // next to its silhouette), and by the composite for the jets on weak-field pixels (WeakJets):
+                    // traced (its straight-line path: the weak bend and the jets) only where one of those needs it
+                    o.t1.w = BH_WEAK_TAG;
+                    bool need = false;
                 #if defined(BH_SINGLE)
-                    // Outside the region: write the weak-field direction with the class of an escaping
-                    // single-hole trace that crossed no disk (traces = 1 -> 32, firstHole = 0 -> 512).
-                    // Cells straddling the region edge then match and reconstruct, instead of all
-                    // failing the class test and going to the full-res trace.
-                    o.t1 = float4(WeakOnlyDir(dir, count), 544.0);
+                    float3 toB = _BHPositionsCamRelative[0].xyz;
+                    float dB = length(toB);
+                    float sinR = saturate(DomainRadius(0) / max(dB, 1e-30));
+                    float marg = 2.0 * g_jetPix;   // two texels (g_jetPix = the texel's angle here)
+                    need = (dot(toB, dir) >= dB * cos(min(asin(sinR) + marg, PI)));
                 #endif
-                    return o;
+                #if defined(BH_JETS)
+                    uint allM = (1u << (uint)count) - 1u;
+                    need = need || JetNearAny(float3(0, 0, 0), dir, 0.0, 3.0e30, count, allM, allM);
+                #endif
+                    if (!need)
+                        return o;
                 }
 
                 g_bhLowRes = true;
@@ -1932,6 +2613,19 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 TraceChain(dir, count, camHole, cr);
                 o.t0 = float4(cr.emAll - cr.emFirst, cr.T);
                 o.t1 = float4(cr.dir, ChainClass(cr));
+                // Outside the regions (TraceChain took its straight-line path: the weak bend and the jets on it).
+            #if defined(BH_SINGLE)
+                // The class of an escaping single-hole trace that crossed no disk (traces = 1 -> 32, firstHole = 0
+                // -> 512), so cells straddling the region edge match and reconstruct instead of all failing the
+                // class test and going to the full-res trace. With the jets: without them, those cells faded the
+                // jets toward 0 (a dark line across each jet where it leaves the region).
+                if (weakOnly)
+                    o.t1.w = 544.0 + BH_WEAK_TAG;
+            #else
+                // (a class Reconstruct never takes, < 32, as before: only the jets are read from these)
+                if (weakOnly)
+                    o.t1.w = 16.0 + BH_WEAK_TAG;
+            #endif
                 o.t2 = cr.firstCross;
                 return o;
             }
@@ -1956,6 +2650,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
             #pragma use_dxc
             #pragma multi_compile_fragment _ BH_SINGLE
             #pragma multi_compile_fragment _ BH_VOLUMETRIC_DISK
+            #pragma multi_compile_fragment _ BH_JETS
 
             float4 FragTrace (Varyings input) : SV_Target
             {
@@ -1971,10 +2666,16 @@ Shader "Custom/BlackHoleLensingPassthrough"
                 ChainResult cr;
                 TraceChain(dir, count, camHole, cr);
                 // how much sky this pixel sees: screen-space derivatives of the final
-                // direction (taken at top level, after the trace, so they are valid)
+                // direction (taken at top level, after the trace, so they are valid). A neighbour behind an
+                // opaque disk has no exit direction (its ray direction is left in cr.dir): across it the
+                // difference means nothing -- it blurred the sky along every disk edge to the top mip.
+                float opq = (!cr.captured && cr.T < 0.01) ? 1.0 : 0.0;
                 float3 dDx = ddx(cr.dir);
                 float3 dDy = ddy(cr.dir);
-                float skyFoot = max(length(dDx), length(dDy));
+                bool okX = (ddx(opq) == 0.0), okY = (ddy(opq) == 0.0);
+                float skyFoot = max(okX ? length(dDx) : 0.0, okY ? length(dDy) : 0.0);
+                if (!okX && !okY)
+                    skyFoot = 2.0 / (UNITY_MATRIX_P[1][1] * _ScreenParams.y);
             #if BH_DEBUG_COST
                 return float4(saturate(g_dbgTraces), 0.0, 0.0, 1);
             #endif
@@ -1998,4 +2699,4 @@ Shader "Custom/BlackHoleLensingPassthrough"
             ENDHLSL
         }
     }
-}
+}

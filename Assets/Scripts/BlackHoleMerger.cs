@@ -81,6 +81,10 @@ public static class BlackHoleMerger
 
         double frac = RadiatedFraction(eta);
         double Mf = M * (1.0 - frac);
+        // a light companion (below the manager's Gap Mass Ratio: it never cleared a gap in the big disk) just falls in:
+        // the big hole keeps its disk, its tilt and its disk's sense of rotation -- not the companion's orbital plane
+        float gapRatio = manager != null ? manager.GapMassRatio : 1e-4f;
+        bool light = m2 < gapRatio * m1;
 
         double3 xcom = (A.worldPosition * m1 + B.worldPosition * m2) / M;
         double3 vcom = (A.velocity * m1 + B.velocity * m2) / M;
@@ -100,7 +104,7 @@ public static class BlackHoleMerger
         // the other way it is stored as a negative spin along that axis. Same physical spin
         // vector, but the disk then always orbits the same way the shared disk did, and
         // tilting from the orbit's plane to the spin's plane never passes through edge-on.
-        bool spinWithOrbit = math.dot(axis, lHat) >= 0;
+        bool spinWithOrbit = math.dot(axis, light ? D3(upA) : lHat) >= 0;   // (light: on the big hole's own side)
         double3 axisDisk = spinWithOrbit ? axis : -axis;
         float spinSigned = (float)(math.min(afMag, 0.998) * (spinWithOrbit ? 1.0 : -1.0));
 
@@ -110,16 +114,19 @@ public static class BlackHoleMerger
         bp.schwarzschildRadiusUnits = (float)(bp.schwarzschildRadiusWorld / GlobalProperties.scale);
         bp.spin = spinSigned;
         float rotMag = Mathf.Abs(bhA.diskRotation) > 0f ? Mathf.Abs(bhA.diskRotation) : 1f;
-        bp.diskRotation = rotMag;   // prograde about axisDisk = the shared disk's orbit sense
-        bp.accretionDisk = bhA.accretionDisk || bhB.accretionDisk;
+        bp.diskRotation = light ? bhA.diskRotation : rotMag;   // prograde about axisDisk = the shared disk's orbit sense
+        bp.accretionDisk = light ? bhA.accretionDisk : (bhA.accretionDisk || bhB.accretionDisk);
 
         A.mass = Mf;
         A.blackHoleParamaters = bp;
         A.blackHoleAppearanceProperties = Blend(A.blackHoleAppearanceProperties, B.blackHoleAppearanceProperties, (float)(m1 / M));
-        A.radius = bp.schwarzschildRadiusWorld * 0.9;
+        A.radius = bp.schwarzschildRadiusWorld;
         A.worldPosition = xcom;
         A.velocity = vcom;
-        keep.transform.rotation = Quaternion.FromToRotation(Vector3.up, V3(axisDisk));
+        keep.transform.rotation = light
+            ? Quaternion.FromToRotation(upA, V3(axisDisk)) * keep.transform.rotation   // (the slight tilt only)
+            : Quaternion.FromToRotation(Vector3.up, V3(axisDisk));
+        keep.transform.localScale = new Vector3((float)(A.radius / GlobalProperties.scale) * 2f, (float)(A.radius / GlobalProperties.scale) * 2f, (float)(A.radius / GlobalProperties.scale) * 2f);
 
         // ---- hand references to the remnant; the removed hole leaves the physics -------
         foreach (GameObject go in bodies)
@@ -163,6 +170,7 @@ public static class BlackHoleMerger
         o.diskDopplerColor = wa * a.diskDopplerColor + wb * b.diskDopplerColor;
         o.diskDopplerBeaming = wa * a.diskDopplerBeaming + wb * b.diskDopplerBeaming;
         o.diskRadialContrast = wa * a.diskRadialContrast + wb * b.diskRadialContrast;
+        o.diskVisibleLight = wa * a.diskVisibleLight + wb * b.diskVisibleLight;
         o.diskBrightness = wa * a.diskBrightness + wb * b.diskBrightness;
         o.diskISCOStress = wa * a.diskISCOStress + wb * b.diskISCOStress;
         o.diskTurbulance = wa * a.diskTurbulance + wb * b.diskTurbulance;

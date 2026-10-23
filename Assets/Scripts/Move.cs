@@ -9,6 +9,7 @@ public class Move : MonoBehaviour
     public float rotateSpeed = 0.3f;
     float yaw, pitch;
     GameObject gameManager = null;
+    public UnityEngine.UI.Slider timeScaleSlider;
     public double3 direction { get; set; } = new double3(0,0,-1);
     int focusIndex = 0;
 
@@ -29,10 +30,17 @@ public class Move : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        if(Keyboard.current.spaceKey.wasPressedThisFrame)
+        if(Keyboard.current.spaceKey.wasPressedThisFrame && !gameManager.GetComponent<SphericalCoordinateSystem>().placing)
         {
-            GlobalProperties.timeScale = 0;
-            GlobalProperties.paused = !GlobalProperties.paused;
+            if(!GlobalProperties.paused)
+            {
+                GlobalProperties.prevTimeScaleSliderValue = timeScaleSlider.value;
+                timeScaleSlider.value = 0;
+            }
+            else
+            {
+                timeScaleSlider.value = GlobalProperties.prevTimeScaleSliderValue;
+            }
         }
         speed = (float)math.abs(GlobalProperties.distanceToClosestBody*GlobalProperties.scale- GlobalProperties.closestBody.GetComponent<Properties>().radius) / 100.0f;
         if (GlobalProperties.focus != null)
@@ -83,7 +91,7 @@ public class Move : MonoBehaviour
             {
                 move -= transform.right;
             }
-            if (Keyboard.current.spaceKey.isPressed)
+            if (Keyboard.current.shiftKey.isPressed)
             {
                 move -= transform.up;
             }
@@ -161,7 +169,10 @@ public class Move : MonoBehaviour
     }
     private void LateUpdate()
     {
-        Camera.main.nearClipPlane = (float)math.clamp((GlobalProperties.distanceToClosestBody - GlobalProperties.closestBody.GetComponent<Properties>().radius/GlobalProperties.scale)/10, 1e-5f, 1000f);
-        Camera.main.farClipPlane = (float)(GlobalProperties.distanceToClosestBody*1000);
+        if (GlobalProperties.closestBody != null)
+        {
+            Camera.main.nearClipPlane = (float)math.clamp((GlobalProperties.distanceToClosestBody - GlobalProperties.closestBody.GetComponent<Properties>().radius / GlobalProperties.scale) / 10, 1e-5f, 1000f);
+            Camera.main.farClipPlane = (float)(GlobalProperties.distanceToClosestBody * 1000);
+        }
     }
 }

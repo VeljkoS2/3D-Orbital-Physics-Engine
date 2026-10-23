@@ -35,6 +35,6 @@ public class Crosshair : MonoBehaviour, IPointerClickHandler
     // Update is called once per frame
     void Update()
     {
-        
+
     }
 }

@@ -7,6 +7,12 @@ public struct BlackHoleAppearanceProperties
     public float diskDopplerColor;
     public float diskDopplerBeaming;
     public float diskRadialContrast;
+    [Tooltip("How the disk's brightness is weighed: 0 = by the total power the gas emits (bolometric, as before), " +
+             "1 = by the visible light in it, as the eye or a camera sees it. Hot gas (tens of thousands of K and up) " +
+             "emits mostly ultraviolet, so in visible light the inner disk outshines the cooler parts far less, and a " +
+             "very massive hole's cool outer disk shows its warm colours. Lower Disk Brightness when raising this " +
+             "for a hot disk.")]
+    [Range(0f, 1f)] public float diskVisibleLight;
     public float diskBrightness;
     public float diskISCOStress;
     public float diskTurbulance;

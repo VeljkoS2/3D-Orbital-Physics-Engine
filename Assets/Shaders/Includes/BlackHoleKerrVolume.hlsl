@@ -59,9 +59,7 @@ float4 _BHVolume;
 //                     z = envelope: max H/r over the disk (x 1.03), w = unused
 float4 _BHDiskThick[9];
 
-// Noise mip for the volume. The reduced-res pass sets log2(downsample): in volumetric mode
-// nothing is re-shaded at full resolution, so the reduced-res samples must not alias.
-static float g_bhDiskLod = 0.0;
+// (g_bhDiskLod, the noise mip: BlackHoleKerrAnalytic.hlsl)
 // a trace continued from where an earlier one of the same ray stopped (a hand-off): the image order its first
 // equator crossing has (g_orderBase, in), and the order the next crossing after this trace would have (out)
 static float g_orderBase = 0.0;
@@ -106,13 +104,6 @@ float VolColumnAbove(float q, float fq)
     float aq = abs(q);
     return (aq <= VOL_CORE) ? (VOL_CORE - aq) + VOL_TAIL
                             : VOL_TAIL * ErfcFromExp((aq - VOL_CORE) * (0.70710678 / VOL_EDGE), fq);
-}
-
-// integral of f from signed q to +infinity: monotone through the midplane, total 2
-float VolCumSigned(float q, float fq)
-{
-    float c = VolColumnAbove(q, fq);
-    return (q >= 0.0) ? c : 2.0 - c;
 }
 
 // outer fade of the sheet (1 inside, 0 at the outer edge)
@@ -200,8 +191,8 @@ float PolarPhiAtLambda(ThetaMotion tm, PolarPhiCum pc, float a, float lambda, fl
     float t = u - 0.5 * k;
     float arg = (t <= 0.25) ? t : 0.5 - t;
     float2 sncn = LutSnCnQuarter(tm.ep, arg);
-    float chi = atan2(sncn.x, pc.c * sncn.y);
-    return k * pc.P + PolarPhiJChi(pc, a, chi, t) - pc.I0;
+    float chiC = atan2(pc.c * sncn.y, sncn.x); // pi/2 - chi (see PolarG)
+    return k * pc.P + PolarPhiJChi(pc, a, chiC, t) - pc.I0;
 }
 
 // an equator crossing within |cos theta| < this of the camera is (partly) the camera's own: it does not make the
@@ -302,27 +293,43 @@ float VolAtmCumSigned(float q)
     return (q >= 0.0) ? c : 2.0 * (1.0 + s) - c;
 }
 
-// Turbulence at a point of the gas: the sheet's two-generation clock (DiskTurbulence), with the
+// Turbulence at a point of the gas: the sheet's generation clock and life zones (DiskTurbulence), with the
 // 3D noise read at height w. Returns the noise in standard deviations (0 = mean).
 float DiskNoise3D(float rT, float phiT, float OmegaT, float drdtT, float w, DiskCtx dc, float dGen)
 {
     float life = dc.hd.life;
-    float gA = dc.genPhase.x + dGen + 0.15 * rT;
-    float gB = gA + 0.5;
-    float fA = frac(gA);
-    float fB = frac(gB);
-    float wA = 1.0 - abs(2.0 * fA - 1.0);
-    float wB = 1.0 - wA;
-    float turnsA = OmegaT * fA * life * (1.0 / TWO_PI);
-    float turnsB = OmegaT * fB * life * (1.0 / TWO_PI);
-    float2 offA = DiskGenOffset(dc.genPhase.y + floor(gA));
-    float2 offB = DiskGenOffset(dc.genPhase.y + floor(gB) + 512.0);
+    float zc = DiskLifeZone(OmegaT, dc.hd.OmegaIn);
+    float k0 = floor(zc);
+    float wHi = smoothstep(0.8, 1.0, zc - k0);
     float baseU = (phiT - dc.rotOffset) * (1.0 / TWO_PI) + 0.5;
-    float3 uvwA = float3(frac(baseU - turnsA) * 4.0, (rT + drdtT * fA * life) * 0.2, w) + float3(offA, offA.x + offA.y);
-    float3 uvwB = float3(frac(baseU - turnsB) * 4.0, (rT + drdtT * fB * life) * 0.2, w) + float3(offB, offB.x - offB.y);
-    float nA = _BHDiskNoise3D.SampleLevel(sampler_BHDiskNoise3D, uvwA, g_bhDiskLod) - 0.5;
-    float nB = _BHDiskNoise3D.SampleLevel(sampler_BHDiskNoise3D, uvwB, g_bhDiskLod) - 0.5;
-    return (wA * nA + wB * nB) * rsqrt(wA * wA + wB * wB) * (1.0 / 0.18);
+    float acc = 0.0, wz2 = 0.0;
+    [loop]
+    for (int j = 0; j < 2; j++)
+    {
+        float wz = (j == 0) ? 1.0 - wHi : wHi;
+        [branch]
+        if (wz <= 0.0)
+            continue;
+        float k = k0 + (float) j;
+        float e = DiskZoneLifeExp(k);
+        float lifeK = life * exp2(e);
+        float creepK = min(lifeK, life);   // (the drift: no further per generation than at the inner edge)
+        float fA, fB, wA, wB;
+        float2 offA, offB;
+        DiskGenZone(dc.genPhase, k, e, dGen, rT, fA, fB, wA, wB, offA, offB);
+        float fMid = DiskZoneShearMid(k);
+        float turnsA = OmegaT * (fA - fMid) * lifeK * (1.0 / TWO_PI);
+        float turnsB = OmegaT * (fB - fMid) * lifeK * (1.0 / TWO_PI);
+        float3 uvwA = float3(DiskTexUV(frac(baseU - turnsA), DiskTexLnR(rT + drdtT * fA * creepK, dc.hd.rIsco), DISK_TEX_TILES3, offA),
+                             w + offA.x + offA.y);
+        float3 uvwB = float3(DiskTexUV(frac(baseU - turnsB), DiskTexLnR(rT + drdtT * fB * creepK, dc.hd.rIsco), DISK_TEX_TILES3, offB),
+                             w + offB.x - offB.y);
+        float nA = _BHDiskNoise3D.SampleLevel(sampler_BHDiskNoise3D, uvwA, g_bhDiskLod) - 0.5;
+        float nB = _BHDiskNoise3D.SampleLevel(sampler_BHDiskNoise3D, uvwB, g_bhDiskLod) - 0.5;
+        acc += wz * ((wA * nA + wB * nB) * rsqrt(wA * wA + wB * wB));
+        wz2 += wz * wz;
+    }
+    return acc * rsqrt(wz2) * (1.0 / 0.18);
 }
 
 // ------------------------------------------------------------------
@@ -335,6 +342,9 @@ struct VolPoint
     float h;        // H / r here
     float hJ;       // H / r without the rim: bounds the gas ahead (jumps above the gas)
     float q;        // height in half-thicknesses (signed)
+    float colC;     // the core's profile integrated above |q| (VolColumnAbove), and the atmosphere's from q up
+    float cumA;     // (VolAtmCumSigned): once per point -- each step's optical depth takes both ends' (they were
+                    // computed twice, and the column once more for tauV)
     float dphi;     // dphi / dlambda
     float muDot;    // dmu / dlambda
     float phi;
@@ -374,6 +384,8 @@ VolPoint VolGeometry(VolRay vr, float lam, DiskCtx dc)
     p.hJ = max(DiskAspectCore(p.r, dc), 1e-4);
     p.h = DiskRim(p.hJ, p.r, dc.diskOutNorm);
     p.q = p.mu / p.h;
+    p.colC = VolColumnAbove(p.q, VolProfile(p.q));
+    p.cumA = VolAtmCumSigned(p.q);
 
     float D = KerrDelta(p.r, a);
     float s2 = max(1.0 - p.mu * p.mu, 1e-4);
@@ -405,17 +417,17 @@ float3 VolSourceEdd(VolPoint p, float edd, float kS, DiskCtx dc)
     float flux = p.flux0 * edd;
     float Temit = dc.ap1.x * sqrt(sqrt(flux)) * (1.0 + 0.12 * p.clump) * (1.0 + 0.35 * p.spot);
     float Tobs = Temit * lerp(1.0, p.g, dc.ap1.y);
-    float brightness = dc.ap2.x
-                     * exp2(dc.ap1.w * log2(max(flux, 1e-6)) + 4.0 * dc.ap1.z * log2(max(p.g, 1e-4)))
+    float g2 = max(p.g, 1e-4) * max(p.g, 1e-4);
+    float brightness = dc.ap2.x * DiskPowU(max(flux, 1e-6), dc.ap1.w) * DiskPowU(g2 * g2, dc.ap1.z)
                      * (1.0 + p.spot);
-    float3 col = BlackbodyColor(Tobs) * (brightness * kS);
+    float3 col = BlackbodyColor(Tobs) * (brightness * kS * DiskVisible(Tobs, dc.ap1.x, dc.hd.h));
     float4 tint = _BHDiskTint[dc.hd.h];
     return lerp(col, dot(col, float3(0.2126, 0.7152, 0.0722)) * tint.rgb, tint.w);
 }
 float3 VolSource(VolPoint p, float tauV, DiskCtx dc)
 {
     float edd = 0.75 * (tauV + 2.0 / 3.0); // grey atmosphere: T^4 / T_sheet^4
-    return p.S1c * (p.kS * exp2(dc.ap1.w * log2(max(edd, 1e-6))));
+    return p.S1c * (p.kS * DiskPowU(max(edd, 1e-6), dc.ap1.w));
 }
 
 // Gas at a sample point (p.phi must be set).
@@ -511,14 +523,17 @@ void VolShade(inout VolPoint p, VolRay vr, float order, DiskCtx dc,
     // gas runs out, optical depth falling log-linearly to VOL_TAU_EDGE, so the rim ends in a
     // dark, see-through curve instead of a dark wall (side-on rays made speckle there)
     float thin = saturate(outer / VOL_THIN_ZONE);
-    float edge = exp((1.0 - thin) * log(max(min(VOL_TAU_EDGE, tauCol), 1e-12) / max(tauCol, 1e-12)));
+    float edge = 1.0;
+    [branch]
+    if (thin < 1.0) // (only the last part of the fade zone: most samples skip the exp / log)
+        edge = exp((1.0 - thin) * log(max(min(VOL_TAU_EDGE, tauCol), 1e-12) / max(tauCol, 1e-12)));
 
     // core: kappa rho = tau / (2 H); path length in the gas frame = Sigma dlambda / g
     float Sigma = r * r + dc.aPhys * dc.aPhys * p.mu * p.mu;
     float base = Sigma / (2.0 * p.h * r * max(g, 0.05));
     float tauSmooth = tauCol * edge * fade;
     p.kA = tauSmooth * dens * base;
-    p.tauV = 0.5 * tauSmooth * VolColumnAbove(p.q, VolProfile(p.q)); // smooth column above
+    p.tauV = 0.5 * tauSmooth * p.colC; // smooth column above
     // atmosphere: its own optical depth, thins with the disk, fades with it at the edge
     float tauAtm = _BHVolume2.x * thinPlunge * edge * fade * outer;
     p.kAa = tauAtm * densA * base / (1.0 + VolAtmS());
@@ -535,16 +550,6 @@ void VolShade(inout VolPoint p, VolRay vr, float order, DiskCtx dc,
     // the atmosphere glows like the disk surface (edd = 1)
     p.SA = p.S1c * (densA * fade * outer * _BHVolume2.w);
     p.sValid = true;
-}
-
-// Point at lam, azimuth continued from pFrom with the trapezoid rule, shaded.
-VolPoint VolAt(VolRay vr, float lam, VolPoint pFrom, float order, DiskCtx dc,
-               Texture2D _Noise, SamplerState sampler_Noise)
-{
-    VolPoint p = VolGeometry(vr, lam, dc);
-    p.phi = pFrom.phi + 0.5 * (lam - pFrom.lam) * (pFrom.dphi + p.dphi);
-    VolShade(p, vr, order, dc, _Noise, sampler_Noise);
-    return p;
 }
 
 // Mino-time step from p.
@@ -584,8 +589,8 @@ float2 VolTau(VolPoint p0, VolPoint p1, float dl)
     [branch]
     if (abs(dq) > 1e-3)
     {
-        fc = max((VolCumSigned(p0.q, VolProfile(p0.q)) - VolCumSigned(p1.q, VolProfile(p1.q))) / dq, 0.0);
-        fa = max((VolAtmCumSigned(p0.q) - VolAtmCumSigned(p1.q)) / dq, 0.0);
+        fc = max((((p0.q >= 0.0) ? p0.colC : 2.0 - p0.colC) - ((p1.q >= 0.0) ? p1.colC : 2.0 - p1.colC)) / dq, 0.0);
+        fa = max((p0.cumA - p1.cumA) / dq, 0.0);
     }
     else
     {
@@ -632,6 +637,8 @@ VolPoint VolGeometryAtR(VolRay vr, float r, float lam, bool rIncreasing, DiskCtx
     p.hJ = max(DiskAspectCore(r, dc), 1e-4);
     p.h = DiskRim(p.hJ, r, dc.diskOutNorm);
     p.q = p.mu / p.h;
+    p.colC = VolColumnAbove(p.q, VolProfile(p.q));
+    p.cumA = VolAtmCumSigned(p.q);
     float D = KerrDelta(r, a);
     float s2 = max(1.0 - p.mu * p.mu, 1e-4);
     p.dphi = a * (r * r + a * a - a * xi) / max(D, 1e-4) + xi / s2 - a;
@@ -750,8 +757,14 @@ void AccumulateDiskVolumeRadial(
                 float lin = (dTau > 1e-3) ? (one - dTau * e) / dTau : dTau * (0.5 - dTau / 3.0);
                 acc.color += (S0 * one + (S1 - S0) * lin) * acc.transmittance;
                 acc.transmittance *= e;
+                // opaque from here: the rest as the gas here (deep in it the light tends to the local source):
+                // dropping it left a step of up to 1% along the contour where a step first got below 0.01
                 if (acc.transmittance < 0.01)
+                {
+                    acc.color += S1 * acc.transmittance;
+                    acc.transmittance = 0.0;
                     break;
+                }
             }
         }
         p0 = p1;
@@ -857,19 +870,34 @@ void AccumulateDiskVolume(
             phiStart += acc.radPhiRem + a * la;
         }
 
-        VolPoint p0 = VolGeometry(vr, la, dc);
-        p0.phi = phiStart;
-        VolShade(p0, vr, order, dc, _Noise, sampler_Noise);
-        float depth = p0.tauV; // optical depth below the core's surface the ray can have reached
-
+        // (the interval's first point is step -1 of the same loop: one copy of the sample code -- it is large)
+        VolPoint p0 = (VolPoint) 0;
+        float depth = 0.0; // optical depth below the core's surface the ray can have reached
         [loop]
-        for (int j = 0; j < maxStepsO; j++)
+        for (int j = -1; j < maxStepsO; j++)
         {
-            if (p0.lam >= lb)
-                break;
-            // the last step of the budget takes whatever is left of the interval
-            float dl = (j == maxStepsO - 1) ? (lb - p0.lam) : min(VolStep(p0, vr, nStepsO, qTop), lb - p0.lam);
-            VolPoint p1 = VolAt(vr, p0.lam + dl, p0, order, dc, _Noise, sampler_Noise);
+            float dl = 0.0;
+            float lamN = la;
+            [branch]
+            if (j >= 0)
+            {
+                if (p0.lam >= lb)
+                    break;
+                // the last step of the budget takes whatever is left of the interval
+                dl = (j == maxStepsO - 1) ? (lb - p0.lam) : min(VolStep(p0, vr, nStepsO, qTop), lb - p0.lam);
+                lamN = p0.lam + dl;
+            }
+            VolPoint p1 = VolGeometry(vr, lamN, dc);
+            // azimuth: exact at the start, then the trapezoid rule from the point before
+            p1.phi = (j < 0) ? phiStart : p0.phi + 0.5 * (lamN - p0.lam) * (p0.dphi + p1.dphi);
+            VolShade(p1, vr, order, dc, _Noise, sampler_Noise);
+            [branch]
+            if (j < 0)
+            {
+                depth = p1.tauV;
+                p0 = p1;
+                continue;
+            }
             float2 t = VolTau(p0, p1, dl);
             float dTau = t.x + t.y;
 
@@ -897,6 +925,8 @@ void AccumulateDiskVolume(
                 // checks made the reconstruction reject nearly every wispy cell (full-res traces)
                 if (acc.transmittance < 0.01)
                 {
+                    acc.color += S1 * acc.transmittance;   // (the rest as the gas here: see AccumulateDiskVolumeRadial)
+                    acc.transmittance = 0.0;
                     acc.crossingCount = (int) order + 1;
                     return;
                 }
