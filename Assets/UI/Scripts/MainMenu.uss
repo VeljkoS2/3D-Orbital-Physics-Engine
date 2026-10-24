@@ -1,60 +1,45 @@
 :root {
 }
 
-.panel {
-    opacity: 1;
-    background-color: rgba(11, 7, 51, 0.616);
-    justify-content: flex-start;
-    align-items: center;
-}
 
-.unity-button {
-    flex-grow: 0;
-    flex-shrink: 1;
-    flex-basis: auto;
-    width: 98%;
+
+
+
+
+
+.mass {
     height: 30%;
-    align-items: stretch;
-    align-self: center;
-    justify-content: flex-start;
+    width: 27%;
+    background-color: rgba(58, 51, 118, 0.482);
+    align-self: flex-start;
     align-content: flex-start;
-    border-left-color: rgb(0, 10, 255);
-    border-right-color: rgb(0, 10, 255);
-    border-top-color: rgb(0, 10, 255);
-    border-bottom-color: rgb(0, 10, 255);
-    border-top-width: 5px;
-    border-right-width: 5px;
-    border-bottom-width: 5px;
-    border-left-width: 5px;
-    border-top-left-radius: 50px;
-    border-top-right-radius: 50px;
-    border-bottom-right-radius: 50px;
-    border-bottom-left-radius: 50px;
-    background-color: rgba(0, 202, 255, 0.643);
-    color: rgb(213, 247, 255);
-    font-size: 55px;
-    -unity-font-style: bold;
-    -unity-font-definition: url("project://database/Library/unity%20default%20resources?fileID=10102&guid=0000000000000000e000000000000000&type=0#LegacyRuntime");
-    -unity-text-outline-color: rgb(0, 119, 255);
-    -unity-text-outline-width: 1px;
-    letter-spacing: 0;
+    align-items: stretch;
+    justify-content: flex-start;
+    top: 68%;
+    left: 1%;
+    border-left-color: rgb(27, 0, 255);
+    border-right-color: rgb(27, 0, 255);
+    border-top-color: rgb(27, 0, 255);
+    border-bottom-color: rgb(27, 0, 255);
+    border-top-width: 7px;
+    border-right-width: 7px;
+    border-bottom-width: 7px;
+    border-left-width: 7px;
+    border-top-left-radius: 53px;
+    border-top-right-radius: 53px;
+    border-bottom-right-radius: 53px;
+    border-bottom-left-radius: 53px;
+    display: flex;
+    visibility: visible;
 }
 
-.menu-look {
-    border-left-color: rgb(25, 26, 99);
-    border-right-color: rgb(25, 26, 99);
-    border-top-color: rgb(25, 26, 99);
-    border-bottom-color: rgb(25, 26, 99);
-    border-top-width: 10px;
-    border-right-width: 10px;
-    border-bottom-width: 10px;
-    border-left-width: 10px;
-    border-top-left-radius: 50px;
-    border-top-right-radius: 50px;
-    border-bottom-right-radius: 50px;
-    border-bottom-left-radius: 50px;
-    background-color: rgba(22, 12, 87, 0.792);
-    width: 29%;
-    height: 100%;
-    justify-content: center;
+.unity-double-field {
+    border-top-left-radius: 43px;
+    border-top-right-radius: 43px;
+    border-bottom-right-radius: 43px;
+    border-bottom-left-radius: 43px;
+    top: 13px;
+    right: 2px;
+    color: rgb(255, 255, 255);
+    font-size: 20px;
 }

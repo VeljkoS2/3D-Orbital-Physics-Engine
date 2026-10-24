@@ -3,7 +3,6 @@ using Unity.Mathematics;
 using Unity.VisualScripting;
 using UnityEngine;
 using UnityEngine.InputSystem;
-using static UnityEditor.ShaderGraph.Internal.KeywordDependentCollection;
 
 public class SphericalCoordinateSystem : MonoBehaviour
 {

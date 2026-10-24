@@ -1529,7 +1529,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                     // nearest one's closest approach with its whole weak bend (as on to infinity: its pull is all near
                     // it) and the others' up to there, its jets on that bent line; then the target's trace from there
                     // (its gas on the piece first, below)
-                    int pass = -1;
+                    int passIndex = -1;
                     float tPass = 3.0e38;
                     int pHost = hoPend ? hoHole : target;
                     // ...and from inside the target's region on its way in too: the ones it passed got their bend at
@@ -1582,15 +1582,15 @@ Shader "Custom/BlackHoleLensingPassthrough"
                             }
                             // (a group behind -- just left: the rest of its bend, from here on, as this trace leaves it out)
                             float tN = max(tcaN3, 0.0);
-                            if (tN < tPass) { tPass = tN; pass = n3; }
+                            if (tN < tPass) { tPass = tN; passIndex = n3; }
                         }
                     }
                     if (passNo)
-                        pass = -1;
+                        passIndex = -1;
                     // (the target's gas on the piece -- on its way in if the piece ends before its closest approach;
                     // after a hand-off its first trace had it)
                     [branch]
-                    if (pass >= 0 && !hoPend && tPass > 0.0 && _BHSpins[pHost].w > 0.5 && ((gasSt >> (uint)pHost) & 1u) == 0u)
+                    if (passIndex >= 0 && !hoPend && tPass > 0.0 && _BHSpins[pHost].w > 0.5 && ((gasSt >> (uint)pHost) & 1u) == 0u)
                     {
                         kT0 = tPass;
                         gasSt |= (1u << (uint)pHost) | 0x100u;
@@ -1599,18 +1599,18 @@ Shader "Custom/BlackHoleLensingPassthrough"
                         continue;
                     }
                     [branch]
-                    if (pass >= 0)
+                    if (passIndex >= 0)
                     {
                         float3 kP = float3(0, 0, 0), dP = float3(0, 0, 0);
-                        uint passBits = GroupBits(pass, count) & ~(done | bendDone);
+                        uint passBits = GroupBits(passIndex, count) & ~(done | bendDone);
                         uint gMaskP = 0u;
                         [loop]
                         for (int w2 = 0; w2 < count; w2++)
                         {
-                            if ((((done | noKick | passBits | bendDone) >> (uint)w2) & 1u) != 0u && w2 != pass) continue;
-                            if (IsMember(w2)) { if (w2 != pass) gMaskP |= 1u << (uint)w2; continue; }
+                            if ((((done | noKick | passBits | bendDone) >> (uint)w2) & 1u) != 0u && w2 != passIndex) continue;
+                            if (IsMember(w2)) { if (w2 != passIndex) gMaskP |= 1u << (uint)w2; continue; }
                             float3 toW = _BHPositionsCamRelative[w2].xyz - p;
-                            float tW = (w2 == pass) ? 3.0e38 : tPass;
+                            float tW = (w2 == passIndex) ? 3.0e38 : tPass;
                             float3 kw, dw;
                             WeakKick(d, toW, _BHParams[w2].x, SpinJ(w2), tW, 0.0, kw, dw);
                             if (firstSeg)
@@ -1627,7 +1627,7 @@ Shader "Custom/BlackHoleLensingPassthrough"
                             dP += dg;
                         }
                         [branch]
-                        if (IsMember(pass))
+                        if (IsMember(passIndex))
                         {
                             // a nested group passed: its whole bend (displacement left out, as for a hole's)
                             float3 kg, dg;
